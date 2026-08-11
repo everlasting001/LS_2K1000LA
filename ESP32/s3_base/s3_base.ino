@@ -210,7 +210,7 @@ static void handle_fpga_frame(const uint8_t *f) {
         uint16_t speed = param ? param : 300;  // 默认 300 RPM
         if (v1 < -12000 || v1 > 12000 || speed > 1000)
             base_error |= 0x01;
-        else if (!emm_position(Serial1, M1_ADDR, v1, speed, true))
+        else if (!emm_position(Serial1, M1_ADDR, v1, speed, true, 10))
             base_error |= 0x02;
         else
             base_error &= ~0x03;

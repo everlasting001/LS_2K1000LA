@@ -47,6 +47,7 @@ ARM_L2_CM = 16.0
 ARM_L3_CM = 9.5
 M3_HOME_DEG = 28.5
 SERVO_HOME_DEG = 127.0
+M1_SPEED_LIMIT_RPM = 25
 
 
 def forward_kinematics(m1_deg, m3_deg, servo_deg):
@@ -262,12 +263,13 @@ class RemoteBackend(object):
         self._write_i16_be(REG_SPEED_H, speed)
         self._write(REG_CMD, CMD_BASE if axis in ("M1", "M4") else CMD_ARM)
         now = time.monotonic()
+        theoretical_seconds = abs(pulses) * 60.0 / (3200.0 * max(1, speed))
         self.pending_motions[axis] = {
             "target": self.positions[axis] + amount,
             "pulses": pulses,
             "started": now,
             "earliest_done": now + 0.25,
-            "deadline": now + 3.5,
+            "deadline": now + max(3.5, theoretical_seconds + 1.5),
         }
         return pulses
 
@@ -435,6 +437,7 @@ class RemoteWindow(QMainWindow):
         self.speed = QSpinBox(); self.speed.setRange(1, 3000); self.speed.setValue(100); self.speed.setSuffix(" RPM")
         self.speed.setMinimumHeight(38)
         grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 4)
+        grid.addWidget(QLabel("M1梯形加减速，限速：25 RPM"), 4, 3)
         grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
 
@@ -571,9 +574,10 @@ class RemoteWindow(QMainWindow):
 
     def move_axis(self, axis, amount):
         units = {"M1": "°", "M2": "mm", "M3": "°", "M4": "mm"}
-        self.run_action(lambda: self.backend.move(axis, amount, self.speed.value()),
+        commanded_speed = min(self.speed.value(), M1_SPEED_LIMIT_RPM) if axis == "M1" else self.speed.value()
+        self.run_action(lambda: self.backend.move(axis, amount, commanded_speed),
                         lambda pulses: "%s 相对运动 %+.2f%s → %d脉冲，速度=%d，CMD=0x%02X（已写入FPGA）" %
-                        (axis, amount, units[axis], pulses, self.speed.value(),
+                        (axis, amount, units[axis], pulses, commanded_speed,
                          CMD_BASE if axis in ("M1", "M4") else CMD_ARM))
         if axis in self.backend.pending_motions and axis in self.motion_labels:
             self.set_motion_label(axis, "运动中", "motionBusy")

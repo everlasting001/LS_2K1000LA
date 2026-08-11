@@ -90,7 +90,8 @@ inline bool emm_enable(HardwareSerial &port, uint8_t addr, bool enable) {
 // 返回: true=命令已确认
 inline bool emm_position(
         HardwareSerial &port, uint8_t addr,
-        int32_t pulses, uint16_t speed, bool relative)
+        int32_t pulses, uint16_t speed, bool relative,
+        uint8_t acceleration = 100)
 {
     // 构造 MODBUS 功能码 0x10 (写多个寄存器) 帧
     // 帧格式: addr, 0x10, 0x00FD(寄存器高位/低位), 0x0005(寄存器数), 0x0A(字节数),
@@ -104,7 +105,7 @@ inline bool emm_position(
     f[7] = pulses < 0;
 
     // 加速度档位 (0–255，数值越大加减速越快)
-    f[8] = 100;
+    f[8] = acceleration;
 
     // 速度 (16 位，高字节在前)
     f[9]  = speed >> 8;
