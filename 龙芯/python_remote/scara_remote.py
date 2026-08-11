@@ -10,7 +10,7 @@ import time
 import fcntl
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -42,6 +42,69 @@ PULSE_PER_CONVEYOR_MM = 3200.0 / (math.pi * 21.0)
 # 统一角度符号约定（俯视机械臂）：M1顺时针为正，M3逆时针为正，旋转舵机顺时针为正。
 ANGLE_DIRECTION_TEXT = "俯视方向：大臂顺时针为正，小臂逆时针为正，旋转舵机顺时针为正"
 HOME_POSITIONS = {"M1": 0.0, "M2": 0.0, "M3": 28.5, "M4": 0.0}
+ARM_L1_CM = 27.5
+ARM_L2_CM = 16.0
+ARM_L3_CM = 9.5
+M3_HOME_DEG = 28.5
+SERVO_HOME_DEG = 127.0
+
+
+def forward_kinematics(m1_deg, m3_deg, servo_deg):
+    """按实物正方向计算三关节平面坐标，返回三个关节点和末端姿态。"""
+    a1 = math.radians(-m1_deg)  # M1顺时针为正，数学角度取负
+    # M3在复位点向大臂顺时针内折28.5°，之后角度增加对应逆时针运动。
+    a2 = a1 + math.radians((m3_deg - M3_HOME_DEG) - M3_HOME_DEG)
+    # 舵机127°时与小臂平行，舵机角增加对应顺时针运动。
+    a3 = a2 - math.radians(servo_deg - SERVO_HOME_DEG)
+    p0 = (0.0, 0.0)
+    p1 = (ARM_L1_CM * math.cos(a1), ARM_L1_CM * math.sin(a1))
+    p2 = (p1[0] + ARM_L2_CM * math.cos(a2), p1[1] + ARM_L2_CM * math.sin(a2))
+    p3 = (p2[0] + ARM_L3_CM * math.cos(a3), p2[1] + ARM_L3_CM * math.sin(a3))
+    pose_deg = ((math.degrees(a3) + 180.0) % 360.0) - 180.0
+    return (p0, p1, p2, p3), pose_deg
+
+
+class ArmCanvas(QWidget):
+    def __init__(self, parent=None):
+        super(ArmCanvas, self).__init__(parent)
+        self.points, self.pose_deg = forward_kinematics(0.0, M3_HOME_DEG, SERVO_HOME_DEG)
+        self.setMinimumHeight(185)
+
+    def set_pose(self, m1_deg, m3_deg, servo_deg):
+        self.points, self.pose_deg = forward_kinematics(m1_deg, m3_deg, servo_deg)
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#07111c"))
+        margin = 18.0
+        span_cm = 2.0 * (ARM_L1_CM + ARM_L2_CM + ARM_L3_CM + 3.0)
+        scale = min((self.width() - margin * 2) / span_cm,
+                    (self.height() - margin * 2) / span_cm)
+        ox, oy = self.width() / 2.0, self.height() / 2.0
+
+        def screen(point):
+            return (ox + point[0] * scale, oy - point[1] * scale)
+
+        painter.setPen(QPen(QColor("#294762"), 1))
+        painter.drawLine(int(margin), int(oy), int(self.width() - margin), int(oy))
+        painter.drawLine(int(ox), int(margin), int(ox), int(self.height() - margin))
+        painter.drawText(int(self.width() - 28), int(oy - 5), "+X")
+        painter.drawText(int(ox + 5), int(margin + 10), "+Y")
+
+        colors = (QColor("#35b8df"), QColor("#6cf0aa"), QColor("#f5b942"))
+        for index in range(3):
+            x1, y1 = screen(self.points[index]); x2, y2 = screen(self.points[index + 1])
+            painter.setPen(QPen(colors[index], 7, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+        painter.setPen(QPen(QColor("#e8f7ff"), 2))
+        painter.setBrush(QBrush(QColor("#10283d")))
+        for point in self.points:
+            x, y = screen(point); painter.drawEllipse(int(x - 5), int(y - 5), 10, 10)
+        ex, ey = screen(self.points[-1])
+        painter.drawText(int(ex + 8), int(ey - 8), "末端")
 
 
 class LinuxI2CBus(object):
@@ -361,7 +424,25 @@ class RemoteWindow(QMainWindow):
         self.speed.setMinimumHeight(38)
         grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 4)
         grid.setColumnStretch(3, 1)
-        layout.addLayout(grid); layout.addStretch(1); return page
+        layout.addLayout(grid)
+
+        view_row = QHBoxLayout()
+        self.arm_canvas = ArmCanvas(); view_row.addWidget(self.arm_canvas, 3)
+        pose_box = QGroupBox("正运动学 / 当前末端")
+        pose_layout = QGridLayout(pose_box)
+        self.fk_x = QLabel("0.00 cm"); self.fk_y = QLabel("0.00 cm")
+        self.fk_z = QLabel("0.00 cm"); self.fk_pose = QLabel("0.00°")
+        for value in (self.fk_x, self.fk_y, self.fk_z, self.fk_pose):
+            value.setObjectName("value")
+        pose_layout.addWidget(QLabel("X"), 0, 0); pose_layout.addWidget(self.fk_x, 0, 1)
+        pose_layout.addWidget(QLabel("Y"), 1, 0); pose_layout.addWidget(self.fk_y, 1, 1)
+        pose_layout.addWidget(QLabel("Z"), 2, 0); pose_layout.addWidget(self.fk_z, 2, 1)
+        pose_layout.addWidget(QLabel("末端姿态"), 3, 0); pose_layout.addWidget(self.fk_pose, 3, 1)
+        pose_layout.addWidget(QLabel("连杆"), 4, 0)
+        pose_layout.addWidget(QLabel("275 + 160 + 95 mm"), 4, 1)
+        view_row.addWidget(pose_box, 1)
+        layout.addLayout(view_row, 1)
+        return page
 
     def actuator_tab(self):
         page = QWidget(); main = QHBoxLayout(page)
@@ -499,6 +580,7 @@ class RemoteWindow(QMainWindow):
     def send_servos(self):
         self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
                         "舵机命令：旋转=%d° 夹爪=%d°" % (self.rotate.value(), self.grip.value()))
+        self.refresh_positions()
 
     def trigger_em(self, index):
         self.run_action(lambda: self.backend.trigger_solenoid(index, self.em_duration.value(), self.em_cooldown.value()),
@@ -533,6 +615,17 @@ class RemoteWindow(QMainWindow):
             unit = "mm" if axis == "M2" else "°"
             self.position_labels[axis].setText("%.2f %s" % (self.backend.positions[axis], unit))
         self.conveyor_position.setText("%.1f mm" % self.backend.positions["M4"])
+        points, pose_deg = forward_kinematics(
+            self.backend.positions["M1"], self.backend.positions["M3"],
+            self.backend.servo_rotate)
+        end = points[-1]
+        self.fk_x.setText("%.2f cm" % end[0])
+        self.fk_y.setText("%.2f cm" % end[1])
+        self.fk_z.setText("%.2f cm" % (self.backend.positions["M2"] / 10.0))
+        self.fk_pose.setText("%.1f°" % pose_deg)
+        self.arm_canvas.set_pose(self.backend.positions["M1"],
+                                 self.backend.positions["M3"],
+                                 self.backend.servo_rotate)
 
     def refresh_zero_labels(self):
         for axis, label in self.zero_labels.items():

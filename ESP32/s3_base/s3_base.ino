@@ -343,9 +343,9 @@ static void reply_loop() {
     r[14] = 0x03; // 两个可选子系统缺席，固定WARN且不阻塞
     r[15] = (base_error & 0x03) | ((arm_status.error & 0x0F) << 2)
           | (!arm_online ? 0x40 : 0);
-    r[16] = ((m1_status & 0x04) ? 0x01 : 0)
-          | ((arm_status.stat1 & 0x04) ? 0x02 : 0)
-          | ((arm_status.stat2 & 0x04) ? 0x04 : 0) | 0x18;
+    r[16] = ((m1_status & 0x02) ? 0x01 : 0)
+          | ((arm_status.stat1 & 0x02) ? 0x02 : 0)
+          | ((arm_status.stat2 & 0x02) ? 0x04 : 0) | 0x18;
     if ((r[16] & 0x07) == 0x07) r[16] |= 0x20;
     r[17] = crc8_ccitt(r, 17);
 
