@@ -9,8 +9,8 @@ import sys
 import time
 import fcntl
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -77,6 +77,37 @@ def servo_for_negative_x(m1_deg, m3_deg, current_servo=127.0):
     return min(candidates, key=lambda value: abs(value - current_servo))
 
 
+def point_in_collision_zone(x, y):
+    return -10.0 <= x <= 20.0 and -10.0 <= y <= 10.0
+
+
+def inverse_kinematics_negative_x(x, y, current_m1=0.0, current_m3=28.5,
+                                  current_servo=127.0):
+    """夹爪末端朝向-X时的逆解；返回按当前位置代价排序的合法解。"""
+    if point_in_collision_zone(x, y):
+        return []
+    wx, wy = x + ARM_L3_CM, y
+    cosine = ((wx * wx + wy * wy - ARM_L1_CM ** 2 - ARM_L2_CM ** 2)
+              / (2.0 * ARM_L1_CM * ARM_L2_CM))
+    if cosine < -1.0 - 1e-9 or cosine > 1.0 + 1e-9:
+        return []
+    cosine = max(-1.0, min(1.0, cosine))
+    solutions = []
+    for elbow_sign in (1.0, -1.0):
+        relative = elbow_sign * math.acos(cosine)
+        a1 = math.atan2(wy, wx) - math.atan2(
+            ARM_L2_CM * math.sin(relative),
+            ARM_L1_CM + ARM_L2_CM * math.cos(relative))
+        m1 = (-math.degrees(a1)) % 360.0
+        m3 = (math.degrees(relative) - 180.0) % 360.0
+        servo = servo_for_negative_x(m1, m3, current_servo)
+        if 0.0 <= m1 <= 350.0 and 28.5 <= m3 <= 300.0 and servo is not None:
+            cost = abs(m1 - current_m1) + abs(m3 - current_m3) + 0.2 * abs(servo - current_servo)
+            solutions.append({"M1": m1, "M3": m3, "SERVO": servo,
+                              "X": x, "Y": y, "cost": cost})
+    return sorted(solutions, key=lambda solution: solution["cost"])
+
+
 class ArmCanvas(QWidget):
     def __init__(self, parent=None):
         super(ArmCanvas, self).__init__(parent)
@@ -118,6 +149,94 @@ class ArmCanvas(QWidget):
             x, y = screen(point); painter.drawEllipse(int(x - 5), int(y - 5), 10, 10)
         ex, ey = screen(self.points[-1])
         painter.drawText(int(ex + 8), int(ey - 8), "末端")
+
+
+class CoordinateCanvas(QWidget):
+    targetSelected = pyqtSignal(float, float)
+    X_MIN, X_MAX, Y_MIN, Y_MAX = -55.0, 55.0, -45.0, 45.0
+
+    def __init__(self, parent=None):
+        super(CoordinateCanvas, self).__init__(parent)
+        self.current_points, _ = forward_kinematics(0.0, M3_HOME_DEG, SERVO_HOME_DEG)
+        self.target = None
+        self.setMinimumSize(590, 390)
+
+    def set_current_pose(self, m1, m3, servo):
+        self.current_points, _ = forward_kinematics(m1, m3, servo)
+        self.update()
+
+    def set_target(self, x, y, reachable):
+        self.target = (x, y, reachable)
+        self.update()
+
+    def geometry_map(self):
+        margin = 32.0
+        scale = min((self.width() - 2 * margin) / (self.X_MAX - self.X_MIN),
+                    (self.height() - 2 * margin) / (self.Y_MAX - self.Y_MIN))
+        ox = self.width() / 2.0
+        oy = self.height() / 2.0
+        return scale, ox, oy
+
+    def to_screen(self, x, y):
+        scale, ox, oy = self.geometry_map()
+        return ox + x * scale, oy - y * scale
+
+    def from_screen(self, sx, sy):
+        scale, ox, oy = self.geometry_map()
+        return (sx - ox) / scale, (oy - sy) / scale
+
+    def mousePressEvent(self, event):
+        x, y = self.from_screen(event.x(), event.y())
+        if self.X_MIN <= x <= self.X_MAX and self.Y_MIN <= y <= self.Y_MAX:
+            self.targetSelected.emit(round(x, 1), round(y, 1))
+
+    def paintEvent(self, event):
+        painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#160d14"))
+        scale, ox, oy = self.geometry_map()
+
+        # 以5cm网格单元近似标出可达/不可达工作空间。
+        for x in range(-55, 55, 5):
+            for y in range(-45, 45, 5):
+                cx, cy = x + 2.5, y + 2.5
+                reachable = bool(inverse_kinematics_negative_x(cx, cy))
+                color = QColor(20, 100, 72, 48) if reachable else QColor(150, 35, 48, 38)
+                sx1, sy1 = self.to_screen(x, y + 5); sx2, sy2 = self.to_screen(x + 5, y)
+                painter.fillRect(int(sx1), int(sy1), int(sx2 - sx1 + 1), int(sy2 - sy1 + 1), color)
+
+        # 明确的机械禁入矩形。
+        x1, y1 = self.to_screen(-10, 10); x2, y2 = self.to_screen(20, -10)
+        painter.fillRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1), QColor(210, 45, 55, 125))
+        painter.setPen(QPen(QColor("#ff6375"), 2)); painter.drawRect(int(x1), int(y1), int(x2-x1), int(y2-y1))
+
+        # 网格与数字刻度：5cm细网格，10cm标注。
+        for x in range(-50, 51, 5):
+            sx, _ = self.to_screen(x, 0)
+            painter.setPen(QPen(QColor("#365064"), 2 if x == 0 else 1))
+            painter.drawLine(int(sx), int(self.to_screen(0, self.Y_MAX)[1]),
+                             int(sx), int(self.to_screen(0, self.Y_MIN)[1]))
+            if x % 10 == 0:
+                painter.drawText(int(sx + 3), int(oy - 4), str(x))
+        for y in range(-40, 41, 5):
+            _, sy = self.to_screen(0, y)
+            painter.setPen(QPen(QColor("#365064"), 2 if y == 0 else 1))
+            painter.drawLine(int(self.to_screen(self.X_MIN, 0)[0]), int(sy),
+                             int(self.to_screen(self.X_MAX, 0)[0]), int(sy))
+            if y % 10 == 0 and y != 0:
+                painter.drawText(int(ox + 4), int(sy - 3), str(y))
+
+        # 当前机械臂。
+        colors = (QColor("#35b8df"), QColor("#6cf0aa"), QColor("#f5b942"))
+        for index in range(3):
+            a = self.to_screen(*self.current_points[index]); b = self.to_screen(*self.current_points[index + 1])
+            painter.setPen(QPen(colors[index], 6, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
+
+        if self.target is not None:
+            tx, ty, reachable = self.target; sx, sy = self.to_screen(tx, ty)
+            painter.setPen(QPen(QColor("#6cf0aa" if reachable else "#ff6375"), 3))
+            painter.drawEllipse(int(sx - 8), int(sy - 8), 16, 16)
+            painter.drawText(int(sx + 10), int(sy - 8), "(%.1f, %.1f)" % (tx, ty))
 
 
 class LinuxI2CBus(object):
