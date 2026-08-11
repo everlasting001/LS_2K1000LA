@@ -49,10 +49,12 @@ class RemoteBackend(object):
         self.em_state = 0
         self.em_deadline = 0.0
         self.remote_error = 0
+        self.conveyor_online = False
 
     def connect(self, simulation):
         self.close()
         self.simulation = simulation
+        self.conveyor_online = False
         if simulation:
             return True, "模拟模式已连接"
         try:
@@ -106,6 +108,8 @@ class RemoteBackend(object):
         return (self._read(register) << 8) | self._read(register + 1)
 
     def move(self, axis, amount, speed):
+        if axis == "M4" and not self.conveyor_online:
+            raise RuntimeError("WARN：传送带缺席，M4命令已跳过；机械臂其他轴仍可使用")
         factors = {"M1": PULSE_PER_DEG, "M2": PULSE_PER_LIFT_MM,
                    "M3": PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
         pulses = int(round(amount * factors[axis]))
@@ -129,6 +133,8 @@ class RemoteBackend(object):
         self.servo_rotate, self.servo_grip = rotate, grip
 
     def trigger_solenoid(self, index, duration_ms, cooldown_ms):
+        if not self.conveyor_online:
+            raise RuntimeError("WARN：传送带执行节点缺席，四路推杆不可用；机械臂流程不受阻")
         if index not in (1, 2, 3, 4):
             raise ValueError("电磁铁编号无效")
         duration = max(10, min(2000, duration_ms)) // 10
@@ -148,13 +154,14 @@ class RemoteBackend(object):
         if self.simulation:
             if self.em_state and time.monotonic() >= self.em_deadline:
                 self.em_state = 0
-            return {"status": 0x61, "error": self.remote_error,
+            return {"status": 0x21, "error": self.remote_error,
                     "em": self.em_state, "raw": dict(self.raw_positions)}
         result = {"status": self._read(REG_STATUS), "error": self._read(REG_REMOTE_ERROR),
                   "em": self._read(REG_EM_STATE), "raw": {}}
         for axis, register in REG_POSITIONS.items():
             result["raw"][axis] = self._read_u16_be(register)
         self.raw_positions.update(result["raw"])
+        self.conveyor_online = bool(result["status"] & 0x40)
         self.remote_error, self.em_state = result["error"], result["em"]
         return result
 
@@ -386,7 +393,12 @@ class RemoteWindow(QMainWindow):
     def poll_status(self):
         try:
             state = self.backend.poll()
-            self.status_label.setText("STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
+            if state["status"] & 0x40:
+                self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
+                self.status_label.setStyleSheet("color:#6cf0aa")
+            else:
+                self.status_label.setText("WARN  传送带+四推杆缺席（机械臂可运行）  STATUS=0x%02X" % state["status"])
+                self.status_label.setStyleSheet("color:#f59e0b")
             self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
             self.refresh_zero_labels()
         except Exception as error:

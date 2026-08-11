@@ -34,8 +34,10 @@ class SimulatedBackend(HardwareBackend):
         self._targets = [0.0] * 4
 
     def connect(self):
-        self.state.fpga_online = self.state.c3_online = True
+        self.state.fpga_online = self.state.router_online = True
+        self.state.c3_online = False
         self.state.base_online = self.state.arm_online = True
+        self.state.conveyor_online = False
         return True
 
     def poll(self):
@@ -97,6 +99,10 @@ class I2cBackend(SimulatedBackend):
             self.bus = None
             return False
         self.state.fpga_online = True
+        self.state.router_online = True
+        self.state.base_online = True
+        self.state.arm_online = True
+        self.state.conveyor_online = False
         return True
 
     def _write_i16(self, register, value):

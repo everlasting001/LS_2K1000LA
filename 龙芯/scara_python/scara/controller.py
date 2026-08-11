@@ -62,6 +62,9 @@ class RobotController(QObject):
         if self.state.emergency_stop:
             self.block("急停未解除")
             return
+        if index == 3 and not self.state.conveyor_online:
+            self.warn("传送带M4离线：该可选动作已跳过，机械臂流程继续")
+            return
         targets = [a.position for a in self.state.axes]
         targets[index] += delta
         ranges = {0: self.kinematics.j1_range, 1: self.kinematics.z_range, 2: self.kinematics.j2_range}
@@ -99,3 +102,9 @@ class RobotController(QObject):
         self.state.security_block_count += 1
         self.state.last_block_reason = reason
         self.log_event.emit("ERROR", f"异构安全防护拦截：{reason}")
+
+    def warn(self, reason):
+        self.state.warning_count += 1
+        self.state.last_warning = reason
+        self.log_event.emit("WARNING", f"降级运行警告：{reason}")
+        self.state_changed.emit()

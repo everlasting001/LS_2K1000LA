@@ -3,7 +3,7 @@ from datetime import datetime
 from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
+    QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
     QLabel, QMainWindow, QMessageBox, QPushButton, QSpinBox, QTabWidget,
     QTextEdit, QVBoxLayout, QWidget,
 )
@@ -30,7 +30,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller, self.state, self.config = controller, controller.state, config
         self.setWindowTitle("基于龙芯2K1000LA的SCARA智能制造分拣系统与FPGA异构硬件防火墙")
-        self.resize(1280, 760)
+        self.setMinimumSize(760, 440)
         self.setStyleSheet(STYLE)
         self.status_labels = {}
         self.axis_labels = []
@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
         page, layout = QWidget(), QVBoxLayout(); page.setLayout(layout)
         self.self_test_labels = {}
         grid = QGridLayout()
-        items = ("龙芯—FPGA通信", "FPGA—C3通信", "Base S3在线", "Arm S3在线", "摄像头在线", "三轴限位输入", "夹爪动作", "传送带动作", "推杆动作", "急停功能")
+        items = ("龙芯—FPGA通信", "FPGA—底盘S3路由", "底盘S3在线", "上臂S3在线", "摄像头在线", "三轴限位输入", "夹爪动作", "传送带（可选）", "推杆（可选）", "急停功能")
         for i, name in enumerate(items):
             label = QLabel("● 未检查"); self.self_test_labels[name] = label
             box = QGroupBox(name); line = QHBoxLayout(); box.setLayout(line); line.addWidget(label); grid.addWidget(box, i//2, i%2)
@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
     def demo_page(self):
         page, layout = QWidget(), QHBoxLayout(); page.setLayout(layout)
         topology, left = QGroupBox("设备拓扑"), QVBoxLayout(); topology.setLayout(left)
-        for key, name in (("fpga", "FPGA硬件网关"), ("c3", "C3安全路由"), ("base", "Base S3"), ("arm", "Arm S3"), ("camera", "视觉系统")):
+        for key, name in (("fpga", "FPGA硬件网关"), ("router", "底盘S3安全路由"), ("base", "底盘S3 / 大臂M1"), ("arm", "上臂S3 / M2+M3"), ("conveyor", "传送带+四推杆（可选）"), ("camera", "视觉系统")):
             label = QLabel(f"● {name}"); self.status_labels[key] = label; left.addWidget(label)
         process, middle = QGroupBox("完整分拣流程"), QVBoxLayout(); process.setLayout(middle)
         self.process_label = QLabel("等待开始"); self.process_label.setStyleSheet("font-size:22px;color:#60a5fa")
@@ -141,12 +141,13 @@ class MainWindow(QMainWindow):
         page, layout = QWidget(), QGridLayout(); page.setLayout(layout)
         scenarios = (
             ("执行节点离线", lambda: self.inject_offline("arm")), ("摄像头离线", lambda: self.inject_offline("camera")),
+            ("传送带缺席（WARN）", lambda: self.inject_offline("conveyor")),
             ("非法命令", lambda: self.controller.block("检测到未知命令码 0xF3，已拒绝执行")),
             ("坐标越界", self.inject_bad_coordinate), ("机械限位", self.inject_limit), ("紧急停止", self.controller.estop),
         )
         for i, (name, slot) in enumerate(scenarios):
             button = QPushButton(name); button.setObjectName("danger"); button.clicked.connect(slot); layout.addWidget(button, i//2, i%2)
-        recover = QPushButton("恢复全部测试状态"); recover.setObjectName("safe"); recover.clicked.connect(self.recover); layout.addWidget(recover, 3, 0, 1, 2)
+        recover = QPushButton("恢复全部测试状态"); recover.setObjectName("safe"); recover.clicked.connect(self.recover); layout.addWidget(recover, 4, 0, 1, 2)
         return page
 
     def check_coordinate(self):
@@ -164,22 +165,33 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "运动被禁止", str(exc))
 
     def run_self_test(self):
-        results = {"龙芯—FPGA通信": self.state.fpga_online, "FPGA—C3通信": self.state.c3_online, "Base S3在线": self.state.base_online, "Arm S3在线": self.state.arm_online, "摄像头在线": self.state.camera_online}
+        results = {"龙芯—FPGA通信": self.state.fpga_online, "FPGA—底盘S3路由": self.state.router_online,
+                   "底盘S3在线": self.state.base_online, "上臂S3在线": self.state.arm_online,
+                   "摄像头在线": self.state.camera_online}
+        optional = {"传送带（可选）": self.state.conveyor_online, "推杆（可选）": self.state.conveyor_online}
         for name, label in self.self_test_labels.items():
-            ok = results.get(name, True); label.setText("● 通过" if ok else "● 未通过"); label.setStyleSheet(f"color:{'#22c55e' if ok else '#ef4444'}")
-        passed = sum(results.get(name, True) for name in self.self_test_labels)
-        self.log("SUCCESS" if passed == len(self.self_test_labels) else "WARNING", f"系统自检完成：{passed}/{len(self.self_test_labels)}项通过")
+            if name in optional and not optional[name]:
+                label.setText("● WARN 缺席（不阻塞）"); label.setStyleSheet("color:#f59e0b")
+            else:
+                ok = results.get(name, optional.get(name, True)); label.setText("● 通过" if ok else "● ERROR"); label.setStyleSheet(f"color:{'#22c55e' if ok else '#ef4444'}")
+        core_ok = all(results.values())
+        self.log("WARNING" if core_ok and not self.state.conveyor_online else "SUCCESS" if core_ok else "ERROR",
+                 "核心自检通过；传送带及四推杆缺席，机械臂降级运行" if core_ok and not self.state.conveyor_online else "系统核心自检%s" % ("通过" if core_ok else "失败"))
 
     def start_demo(self):
         if self.state.emergency_stop:
             QMessageBox.warning(self, "禁止启动", "请先解除急停并重新回零"); return
+        if not all((self.state.fpga_online, self.state.router_online, self.state.base_online, self.state.arm_online)):
+            QMessageBox.critical(self, "核心故障", "FPGA或机械臂核心执行节点离线，自动流程已阻塞"); return
         self.demo_step = 0; self.demo_timer.start(900); self.advance_demo()
 
     def advance_demo(self):
-        steps = ("系统自检", "三轴联合回零", "等待并检测物料", "移动到取料点", "下降并夹取", "提升并搬运", "放置到传送带", "摄像头颜色识别", "安全策略审核", "推杆执行分拣", "记录结果", "返回待机位")
+        steps = ("系统自检", "三轴联合回零", "等待目标", "移动到取料点", "下降并夹取", "提升并搬运",
+                 "传送带缺席：WARN，自动跳过", "安全策略审核", "机械臂直接分类放置", "记录结果", "返回待机位")
         if self.demo_step >= len(steps):
             self.process_label.setText("✓ 完整分拣流程完成"); self.demo_timer.stop(); self.log("SUCCESS", "完整智能分拣周期完成"); return
-        step = steps[self.demo_step]; self.process_label.setText(f"● {step}"); self.log("INFO", f"分拣阶段：{step}")
+        step = steps[self.demo_step]; self.process_label.setText(f"● {step}")
+        self.log("WARNING" if "WARN" in step else "INFO", f"分拣阶段：{step}")
         if self.demo_step == 1: self.controller.home()
         self.demo_step += 1
 
@@ -187,8 +199,12 @@ class MainWindow(QMainWindow):
         self.demo_timer.stop(); self.process_label.setText("流程已终止"); self.log("WARNING", "自动分拣流程由操作员终止")
 
     def inject_offline(self, device):
-        if device == "arm": self.state.arm_online = False; message = "Arm S3心跳超时，运动指令已禁止"
-        else: self.state.camera_online = False; message = "摄像头离线，视觉分拣已暂停"
+        if device == "conveyor":
+            self.state.conveyor_online = False
+            self.controller.warn("传送带及四路推杆节点缺席；相关步骤跳过，机械臂核心流程不受阻")
+            self.refresh(); return
+        if device == "arm": self.state.arm_online = False; message = "上臂S3心跳超时，机械臂运动指令已禁止"
+        else: self.state.camera_online = False; message = "摄像头离线，视觉识别暂停"
         self.controller.block(message); self.stop_demo(); self.refresh()
 
     def inject_bad_coordinate(self):
@@ -199,7 +215,9 @@ class MainWindow(QMainWindow):
         self.state.axes[1].limit = True; self.controller.block("升降上限位触发，仅允许向下退出"); self.stop_demo()
 
     def recover(self):
-        self.state.fpga_online = self.state.c3_online = self.state.base_online = self.state.arm_online = True
+        self.state.fpga_online = self.state.router_online = self.state.base_online = self.state.arm_online = True
+        self.state.c3_online = False
+        self.state.conveyor_online = False
         self.state.camera_online = True; self.state.emergency_stop = False
         for axis in self.state.axes: axis.limit = axis.fault = False
         self.controller.home(); self.log("SUCCESS", "测试故障已清除，系统已重新回零")
@@ -207,10 +225,22 @@ class MainWindow(QMainWindow):
     def refresh(self):
         for label, axis, unit in zip(self.axis_labels, self.state.axes, ("°", "mm", "°", "mm")):
             label.setText(f"{axis.position:.1f} {unit}　{'到位' if axis.done else '运动中'}")
-        states = {"fpga": self.state.fpga_online, "c3": self.state.c3_online, "base": self.state.base_online, "arm": self.state.arm_online, "camera": self.state.camera_online}
+        states = {"fpga": self.state.fpga_online, "router": self.state.router_online, "base": self.state.base_online,
+                  "arm": self.state.arm_online, "conveyor": self.state.conveyor_online, "camera": self.state.camera_online}
         for key, label in self.status_labels.items():
-            label.setStyleSheet(f"color:{'#22c55e' if states[key] else '#ef4444'}")
-        self.firewall_label.setText(f"运行模式：主动防护\n通过指令：{self.state.security_allow_count}\n拦截指令：{self.state.security_block_count}\n最近事件：{self.state.last_block_reason}\n急停状态：{'已触发' if self.state.emergency_stop else '正常'}")
+            if key == "conveyor" and not states[key]:
+                label.setText("● 传送带+四推杆：WARN 缺席（不阻塞）"); label.setStyleSheet("color:#f59e0b")
+            else:
+                label.setStyleSheet(f"color:{'#22c55e' if states[key] else '#ef4444'}")
+        level = "WARN（降级运行）" if not self.state.conveyor_online else "OK"
+        self.firewall_label.setText(f"系统健康：{level}\n核心机械臂：{'可运行' if self.state.ready else '被阻塞'}\n通过指令：{self.state.security_allow_count}\n警告事件：{self.state.warning_count}\n拦截指令：{self.state.security_block_count}\n最近警告：{self.state.last_warning}\n急停状态：{'已触发' if self.state.emergency_stop else '正常'}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_screen_fitted", False):
+            area = QApplication.desktop().availableGeometry(self)
+            self.resize(min(1024, max(760, area.width()-10)), min(600, max(440, area.height()-10)))
+            self._screen_fitted = True
 
     def log(self, level, message):
         colors = {"SUCCESS": QColor("#22c55e"), "ERROR": QColor("#ef4444"), "WARNING": QColor("#f59e0b"), "INFO": QColor("#93c5fd")}
