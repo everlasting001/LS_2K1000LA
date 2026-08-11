@@ -10,7 +10,7 @@ import time
 import fcntl
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -458,6 +458,9 @@ class RemoteWindow(QMainWindow):
     def __init__(self):
         super(RemoteWindow, self).__init__()
         self.backend = RemoteBackend()
+        self.coordinate_solution = None
+        self.coordinate_queue = []
+        self.coordinate_active_axis = None
         self.zero_data = self.load_zero_data()
         self.setWindowTitle("龙芯 SCARA 简易遥控与零点校准")
         self.setMinimumSize(760, 440)
@@ -512,6 +515,7 @@ class RemoteWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.axis_tab(), "轴遥控")
+        self.tabs.addTab(self.coordinate_tab(), "坐标控制")
         self.tabs.addTab(self.actuator_tab(), "舵机/传送带/电磁铁")
         self.tabs.addTab(self.calibration_tab(), "零点校准与状态")
         outer.addWidget(self.tabs, 1)
@@ -581,6 +585,36 @@ class RemoteWindow(QMainWindow):
         pose_layout.addWidget(self.required_servo, 6, 0, 1, 2)
         view_row.addWidget(pose_box, 1)
         layout.addLayout(view_row, 1)
+        return page
+
+    def coordinate_tab(self):
+        page = QWidget(); layout = QHBoxLayout(page)
+        self.coordinate_canvas = CoordinateCanvas()
+        self.coordinate_canvas.targetSelected.connect(self.coordinate_canvas_clicked)
+        layout.addWidget(self.coordinate_canvas, 3)
+
+        controls = QGroupBox("末端坐标 / 夹爪朝向 −X")
+        form = QGridLayout(controls)
+        self.coord_x = QDoubleSpinBox(); self.coord_x.setRange(-55, 55)
+        self.coord_y = QDoubleSpinBox(); self.coord_y.setRange(-45, 45)
+        for box in (self.coord_x, self.coord_y):
+            box.setDecimals(1); box.setSingleStep(0.5); box.setSuffix(" cm"); box.setMinimumHeight(40)
+        self.coord_x.setValue(-28.2); self.coord_y.setValue(9.5)
+        form.addWidget(QLabel("目标 X"), 0, 0); form.addWidget(self.coord_x, 0, 1)
+        form.addWidget(QLabel("目标 Y"), 1, 0); form.addWidget(self.coord_y, 1, 1)
+        solve = QPushButton("仅解算"); solve.setMinimumHeight(42); solve.clicked.connect(self.solve_coordinate)
+        execute = QPushButton("执行目标"); execute.setObjectName("primary"); execute.setMinimumHeight(42)
+        execute.clicked.connect(self.execute_coordinate)
+        form.addWidget(solve, 2, 0); form.addWidget(execute, 2, 1)
+        self.touch_execute = QCheckBox("触摸可达点后自动执行")
+        self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 3, 0, 1, 2)
+        self.coord_result = QLabel("点击网格或输入坐标后解算")
+        self.coord_result.setWordWrap(True); self.coord_result.setMinimumHeight(120)
+        form.addWidget(self.coord_result, 4, 0, 1, 2)
+        legend = QLabel("绿色：可达  红色：不可达/禁入\n红色禁入区：X=-10～20，Y=-10～10\n执行顺序：M1 → M3 → 夹爪")
+        legend.setWordWrap(True); form.addWidget(legend, 5, 0, 1, 2)
+        form.setRowStretch(6, 1)
+        layout.addWidget(controls, 1)
         return page
 
     def actuator_tab(self):
@@ -742,6 +776,85 @@ class RemoteWindow(QMainWindow):
             return
         self.move_axis(axis, delta)
 
+    def coordinate_canvas_clicked(self, x, y):
+        self.coord_x.setValue(x); self.coord_y.setValue(y)
+        solution = self.solve_coordinate()
+        if solution is not None and self.touch_execute.isChecked():
+            self.execute_coordinate()
+
+    def solve_coordinate(self, checked=False):
+        x, y = self.coord_x.value(), self.coord_y.value()
+        solutions = inverse_kinematics_negative_x(
+            x, y, self.backend.positions["M1"], self.backend.positions["M3"],
+            self.backend.servo_rotate)
+        reachable = bool(solutions)
+        self.coordinate_canvas.set_target(x, y, reachable)
+        if not solutions:
+            self.coordinate_solution = None
+            reason = ("机械禁入区" if point_in_collision_zone(x, y)
+                      else "超出工作空间或关节/舵机限幅")
+            self.coord_result.setText("不可达：%s\n目标 (%.1f, %.1f) 未发送" % (reason, x, y))
+            self.coord_result.setStyleSheet("color:#ff6375; font-weight:700")
+            self.append_log("坐标拒绝：(%.1f, %.1f) %s" % (x, y, reason))
+            return None
+        self.coordinate_solution = solutions[0]
+        s = self.coordinate_solution
+        self.coord_result.setText(
+            "可达 ✓\nM1 = %.2f°\nM3 = %.2f°\n旋转舵机 = %.2f°\n末端姿态 = 180°（−X）" %
+            (s["M1"], s["M3"], s["SERVO"]))
+        self.coord_result.setStyleSheet("color:#6cf0aa; font-weight:700")
+        self.append_log("坐标解算：(%.1f, %.1f) → M1=%.2f M3=%.2f 舵机=%.2f" %
+                        (x, y, s["M1"], s["M3"], s["SERVO"]))
+        return s
+
+    def execute_coordinate(self, checked=False):
+        if self.coordinate_active_axis or self.coordinate_queue or self.backend.pending_motions:
+            QMessageBox.warning(self, "系统忙", "当前仍有运动任务，请等待到位")
+            return
+        solution = self.solve_coordinate()
+        if solution is None:
+            return
+        self.coordinate_queue = [
+            ("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
+            ("M3", solution["M3"], self.speed.value()),
+            ("SERVO", solution["SERVO"], 0),
+        ]
+        self.append_log("坐标运动开始：先动大小臂，最后调整夹爪")
+        self.advance_coordinate_sequence()
+
+    def advance_coordinate_sequence(self):
+        if not self.coordinate_queue:
+            self.coordinate_active_axis = None
+            self.coord_result.setText(self.coord_result.text() + "\n运动完成 ✓")
+            self.append_log("坐标运动完成")
+            return
+        axis, target, speed = self.coordinate_queue.pop(0)
+        if axis == "SERVO":
+            command = int(round(target))
+            try:
+                self.backend.set_servos(command, self.backend.servo_grip)
+                for line in self.backend.take_write_trace(): self.append_log(line)
+                self.rotate.setValue(command)
+                self.refresh_positions()
+                self.append_log("夹爪末端姿态已调整为−X，舵机=%d°" % command)
+                self.advance_coordinate_sequence()
+            except Exception as error:
+                self.coordinate_queue = []
+                self.append_log("坐标运动失败：%s" % error)
+            return
+        delta = target - self.backend.positions[axis]
+        if abs(delta) < 0.05:
+            self.advance_coordinate_sequence(); return
+        try:
+            self.backend.move(axis, delta, speed)
+            for line in self.backend.take_write_trace(): self.append_log(line)
+            self.coordinate_active_axis = axis
+            self.set_motion_label(axis, "运动中", "motionBusy")
+            self.append_log("坐标阶段：%s → %.2f°，等待到位" % (axis, target))
+        except Exception as error:
+            self.coordinate_queue = []; self.coordinate_active_axis = None
+            self.append_log("坐标运动失败：%s" % error)
+
     def send_servos(self):
         self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
                         "舵机命令：旋转=%d° 夹爪=%d°" % (self.rotate.value(), self.grip.value()))
@@ -753,6 +866,8 @@ class RemoteWindow(QMainWindow):
 
     def estop(self):
         self.run_action(self.backend.estop, "全系统急停已发送；电磁铁全部缩回")
+        self.coordinate_queue = []
+        self.coordinate_active_axis = None
         for axis in ("M1", "M2", "M3"):
             self.set_motion_label(axis, "已急停", "motionTimeout")
 
@@ -798,6 +913,10 @@ class RemoteWindow(QMainWindow):
         self.arm_canvas.set_pose(self.backend.positions["M1"],
                                  self.backend.positions["M3"],
                                  self.backend.servo_rotate)
+        if hasattr(self, "coordinate_canvas"):
+            self.coordinate_canvas.set_current_pose(self.backend.positions["M1"],
+                                                    self.backend.positions["M3"],
+                                                    self.backend.servo_rotate)
 
     def refresh_zero_labels(self):
         for axis, label in self.zero_labels.items():
@@ -814,10 +933,17 @@ class RemoteWindow(QMainWindow):
                     self.set_motion_label(axis, "已到位", "motionDone")
                     self.append_log("%s 已到位：当前位置更新为 %.2f" % (axis, motion["target"]))
                     self.axis_steps[axis].setValue(motion["target"])
+                    if axis == self.coordinate_active_axis:
+                        self.coordinate_active_axis = None
+                        QTimer.singleShot(100, self.advance_coordinate_sequence)
                 else:
                     self.set_motion_label(axis, "超时", "motionTimeout")
                     self.append_log("%s 运动超时：目标 %.2f 未确认，当前位置保持 %.2f" %
                                     (axis, motion["target"], self.backend.positions[axis]))
+                    if axis == self.coordinate_active_axis:
+                        self.coordinate_active_axis = None
+                        self.coordinate_queue = []
+                        self.coord_result.setText(self.coord_result.text() + "\n运动超时，流程终止")
             self.refresh_positions()
             if state["status"] & 0x40:
                 self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
