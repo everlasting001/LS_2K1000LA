@@ -91,6 +91,7 @@ class RemoteBackend(object):
         self.em_deadline = 0.0
         self.remote_error = 0
         self.conveyor_online = False
+        self.pending_motions = {}
 
     def connect(self, simulation):
         self.close()
@@ -125,6 +126,7 @@ class RemoteBackend(object):
                 pass
         self.bus = None
         self.connected = False
+        self.pending_motions.clear()
 
     def _write(self, register, value):
         if not self.connected:
@@ -173,6 +175,8 @@ class RemoteBackend(object):
     def move(self, axis, amount, speed):
         if axis == "M4" and not self.conveyor_online:
             raise RuntimeError("WARN：传送带缺席，M4命令已跳过；机械臂其他轴仍可使用")
+        if axis in self.pending_motions:
+            raise RuntimeError("%s仍在运动中，请等待到位或超时" % axis)
         factors = {"M1": PULSE_PER_DEG, "M2": PULSE_PER_LIFT_MM,
                    # 电机当前正脉冲方向与小臂规定的正角方向相反。
                    "M3": -PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
@@ -182,9 +186,30 @@ class RemoteBackend(object):
         self._write_i32_be(REG_TARGETS[partner], 0)
         self._write_i16_be(REG_SPEED_H, speed)
         self._write(REG_CMD, CMD_BASE if axis in ("M1", "M4") else CMD_ARM)
-        self.positions[axis] += amount
-        self.raw_positions[axis] = (self.raw_positions[axis] + pulses) & 0xFFFF
+        now = time.monotonic()
+        self.pending_motions[axis] = {
+            "target": self.positions[axis] + amount,
+            "pulses": pulses,
+            "started": now,
+            "earliest_done": now + 0.25,
+            "deadline": now + 3.5,
+        }
         return pulses
+
+    def update_motion_states(self, done_flags):
+        """提交已到位目标；超时时保留最后确认位置。返回状态变化事件。"""
+        done_bits = {"M1": 0x01, "M2": 0x02, "M3": 0x04, "M4": 0x08}
+        now = time.monotonic()
+        events = []
+        for axis, motion in list(self.pending_motions.items()):
+            if now >= motion["earliest_done"] and (done_flags & done_bits[axis]):
+                self.positions[axis] = motion["target"]
+                events.append((axis, "done", motion))
+                del self.pending_motions[axis]
+            elif now >= motion["deadline"]:
+                events.append((axis, "timeout", motion))
+                del self.pending_motions[axis]
+        return events
 
     def set_servos(self, rotate, grip):
         if not 0 <= rotate <= 270 or not 0 <= grip <= 180:
@@ -213,6 +238,7 @@ class RemoteBackend(object):
     def estop(self):
         self._write(REG_CMD, CMD_ESTOP)
         self.em_state = 0
+        self.pending_motions.clear()
 
     def poll(self):
         if self.simulation:
@@ -241,6 +267,7 @@ class RemoteWindow(QMainWindow):
         self.setMinimumSize(760, 440)
         self.build_ui()
         self.apply_style()
+        self.refresh_positions()
         self.connect_backend()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_status)
@@ -300,9 +327,10 @@ class RemoteWindow(QMainWindow):
         note.setObjectName("hint"); layout.addWidget(note)
         grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(8)
         grid.addWidget(QLabel("执行轴"), 0, 0); grid.addWidget(QLabel("当前位置"), 0, 1)
-        grid.addWidget(QLabel("指定目标位置"), 0, 2); grid.addWidget(QLabel("精确调整"), 0, 3)
-        grid.addWidget(QLabel("执行"), 0, 4)
+        grid.addWidget(QLabel("状态"), 0, 2); grid.addWidget(QLabel("指定目标位置"), 0, 3)
+        grid.addWidget(QLabel("精确调整"), 0, 4); grid.addWidget(QLabel("执行"), 0, 5)
         self.position_labels = {}
+        self.motion_labels = {}
         definitions = (("M1 大臂", "M1", "°", 0.0, 0.0, 350.0),
                        ("M2 升降", "M2", "mm", 0.0, 0.0, 120.0),
                        ("M3 小臂", "M3", "°", 28.5, 28.5, 300.0))
@@ -310,6 +338,7 @@ class RemoteWindow(QMainWindow):
         self.axis_sliders = {}
         for row, (caption, axis, unit, value, minimum, maximum) in enumerate(definitions, 1):
             label = QLabel("0.00 %s" % unit); label.setObjectName("value"); self.position_labels[axis] = label
+            state_label = QLabel("空闲"); state_label.setObjectName("motionIdle"); self.motion_labels[axis] = state_label
             slider = QSlider(Qt.Horizontal); slider.setRange(int(minimum * 10), int(maximum * 10)); slider.setValue(int(value * 10))
             slider.setMinimumWidth(360); slider.setMinimumHeight(42); slider.setSingleStep(1); slider.setPageStep(10)
             step = QDoubleSpinBox(); step.setRange(minimum, maximum); step.setDecimals(1); step.setSingleStep(1.0)
@@ -326,12 +355,12 @@ class RemoteWindow(QMainWindow):
             self.axis_steps[axis] = step
             self.axis_sliders[axis] = slider
             grid.addWidget(QLabel(caption), row, 0); grid.addWidget(label, row, 1)
-            grid.addWidget(slider, row, 2); grid.addLayout(adjust, row, 3)
-            grid.addWidget(ok, row, 4)
-        self.speed = QSpinBox(); self.speed.setRange(1, 3000); self.speed.setValue(300); self.speed.setSuffix(" RPM")
+            grid.addWidget(state_label, row, 2); grid.addWidget(slider, row, 3)
+            grid.addLayout(adjust, row, 4); grid.addWidget(ok, row, 5)
+        self.speed = QSpinBox(); self.speed.setRange(1, 3000); self.speed.setValue(100); self.speed.setSuffix(" RPM")
         self.speed.setMinimumHeight(38)
-        grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 3)
-        grid.setColumnStretch(2, 1)
+        grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 4)
+        grid.setColumnStretch(3, 1)
         layout.addLayout(grid); layout.addStretch(1); return page
 
     def actuator_tab(self):
@@ -403,6 +432,10 @@ class RemoteWindow(QMainWindow):
             QPushButton#primary { background:#087fa5; font-weight:700; }
             QPushButton#axisOk { background:#087fa5; font-weight:700; font-size:14px; }
             QPushButton#estop { background:#a42335; border-color:#ff6375; font-weight:700; padding:7px 18px; }
+            QLabel#motionIdle { color:#9db2c3; }
+            QLabel#motionBusy { color:#54c7ff; font-weight:700; }
+            QLabel#motionDone { color:#6cf0aa; font-weight:700; }
+            QLabel#motionTimeout { color:#ff6375; font-weight:700; }
             QSlider::groove:horizontal { height:10px; background:#294762; border-radius:5px; }
             QSlider::sub-page:horizontal { background:#16a4cc; border-radius:5px; }
             QSlider::handle:horizontal { background:#e8f7ff; border:2px solid #16a4cc; width:28px; margin:-10px 0; border-radius:14px; }
@@ -444,7 +477,15 @@ class RemoteWindow(QMainWindow):
                         lambda pulses: "%s 相对运动 %+.2f%s → %d脉冲，速度=%d，CMD=0x%02X（已写入FPGA）" %
                         (axis, amount, units[axis], pulses, self.speed.value(),
                          CMD_BASE if axis in ("M1", "M4") else CMD_ARM))
+        if axis in self.backend.pending_motions and axis in self.motion_labels:
+            self.set_motion_label(axis, "运动中", "motionBusy")
         self.refresh_positions()
+
+    def set_motion_label(self, axis, text, object_name):
+        label = self.motion_labels[axis]
+        label.setObjectName(object_name)
+        label.setText(text)
+        label.style().unpolish(label); label.style().polish(label)
 
     def send_axis_control(self, axis):
         target = self.axis_steps[axis].value()
@@ -465,6 +506,8 @@ class RemoteWindow(QMainWindow):
 
     def estop(self):
         self.run_action(self.backend.estop, "全系统急停已发送；电磁铁全部缩回")
+        for axis in ("M1", "M2", "M3"):
+            self.set_motion_label(axis, "已急停", "motionTimeout")
 
     def calibrate_axis(self, axis):
         self.zero_data["encoder_raw"][axis] = int(self.backend.raw_positions[axis])
@@ -499,6 +542,18 @@ class RemoteWindow(QMainWindow):
     def poll_status(self):
         try:
             state = self.backend.poll()
+            for axis, event, motion in self.backend.update_motion_states(state["done"]):
+                if axis not in self.motion_labels:
+                    continue
+                if event == "done":
+                    self.set_motion_label(axis, "已到位", "motionDone")
+                    self.append_log("%s 已到位：当前位置更新为 %.2f" % (axis, motion["target"]))
+                    self.axis_steps[axis].setValue(motion["target"])
+                else:
+                    self.set_motion_label(axis, "超时", "motionTimeout")
+                    self.append_log("%s 运动超时：目标 %.2f 未确认，当前位置保持 %.2f" %
+                                    (axis, motion["target"], self.backend.positions[axis]))
+            self.refresh_positions()
             if state["status"] & 0x40:
                 self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
                 self.status_label.setStyleSheet("color:#6cf0aa")

@@ -224,7 +224,7 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x02;
             emm_read_status(Serial2, M3_ADDR, status_packet.stat2);
-            if (status_packet.stat2 & 0x08) active_motion_mask &= ~0x02;
+            if (status_packet.stat2 & 0x04) active_motion_mask &= ~0x02;
         }
     } else {
         // 轮询 M2 (升降, Serial1)
@@ -233,7 +233,7 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x01;
             emm_read_status(Serial1, M2_ADDR, status_packet.stat1);
-            if (status_packet.stat1 & 0x08) active_motion_mask &= ~0x01;
+            if (status_packet.stat1 & 0x04) active_motion_mask &= ~0x01;
         }
     }
 }

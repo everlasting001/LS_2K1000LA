@@ -199,7 +199,7 @@ inline bool emm_read_position(
 }
 
 // 读取电机状态标志 (寄存器 0x003A, 1 个寄存器 = 2 字节)
-// 位定义: bit0=使能, bit3=位置到达, bit4/5=堵转标志
+// 位定义: bit2=位置到达, bit3=堵转（与旧版已验证工程保持一致）
 inline bool emm_read_status(
         HardwareSerial &port, uint8_t addr, uint8_t &status)
 {
