@@ -81,6 +81,15 @@ def point_in_collision_zone(x, y):
     return -10.0 <= x <= 20.0 and -10.0 <= y <= 10.0
 
 
+def quick_coordinate_reachable(x, y):
+    """仅供画布快速着色；真正执行前仍使用完整逆运动学校验。"""
+    if point_in_collision_zone(x, y):
+        return False
+    radius = math.hypot(x, y)
+    min_radius = max(0.0, ARM_L1_CM - ARM_L2_CM - ARM_L3_CM)
+    return min_radius <= radius <= ARM_L1_CM + ARM_L2_CM + ARM_L3_CM
+
+
 def inverse_kinematics_negative_x(x, y, current_m1=0.0, current_m3=28.5,
                                   current_servo=127.0):
     """夹爪末端朝向-X时的逆解；返回按当前位置代价排序的合法解。"""
@@ -105,6 +114,50 @@ def inverse_kinematics_negative_x(x, y, current_m1=0.0, current_m3=28.5,
             cost = abs(m1 - current_m1) + abs(m3 - current_m3) + 0.2 * abs(servo - current_servo)
             solutions.append({"M1": m1, "M3": m3, "SERVO": servo,
                               "X": x, "Y": y, "cost": cost})
+    return sorted(solutions, key=lambda solution: solution["cost"])
+
+
+def inverse_kinematics_flexible(x, y, current_m1=0.0, current_m3=28.5,
+                                current_servo=127.0):
+    """搜索自由末端姿态的合法解，并优先选择可用舵机角区间的中间值。"""
+    if point_in_collision_zone(x, y):
+        return []
+    solutions = []
+    for pose_deg in range(-180, 180, 2):
+        pose = math.radians(pose_deg)
+        wx = x - ARM_L3_CM * math.cos(pose)
+        wy = y - ARM_L3_CM * math.sin(pose)
+        cosine = ((wx * wx + wy * wy - ARM_L1_CM ** 2 - ARM_L2_CM ** 2)
+                  / (2.0 * ARM_L1_CM * ARM_L2_CM))
+        if not -1.0 <= cosine <= 1.0:
+            continue
+        relative_abs = math.acos(max(-1.0, min(1.0, cosine)))
+        for relative in (relative_abs, -relative_abs):
+            a1 = math.atan2(wy, wx) - math.atan2(
+                ARM_L2_CM * math.sin(relative),
+                ARM_L1_CM + ARM_L2_CM * math.cos(relative))
+            m1 = (-math.degrees(a1)) % 360.0
+            m3 = (math.degrees(relative) - 180.0) % 360.0
+            small_arm_deg = -m1 + 180.0 + m3
+            raw_servo = SERVO_HOME_DEG + small_arm_deg - pose_deg
+            servo_candidates = [raw_servo - 360.0 * turn for turn in range(-2, 4)
+                                if 0.0 <= raw_servo - 360.0 * turn <= 270.0]
+            if not (0.0 <= m1 <= 350.0 and 28.5 <= m3 <= 300.0 and servo_candidates):
+                continue
+            for servo in servo_candidates:
+                joint_cost = abs(m1-current_m1) + abs(m3-current_m3) + 0.1*abs(servo-current_servo)
+                solutions.append({"M1": m1, "M3": m3, "SERVO": servo,
+                                  "X": x, "Y": y, "POSE": float(pose_deg),
+                                  "joint_cost": joint_cost})
+    if not solutions:
+        return []
+    servo_min = min(item["SERVO"] for item in solutions)
+    servo_max = max(item["SERVO"] for item in solutions)
+    servo_mid = (servo_min + servo_max) / 2.0
+    for item in solutions:
+        item["SERVO_MIN"] = servo_min
+        item["SERVO_MAX"] = servo_max
+        item["cost"] = abs(item["SERVO"] - servo_mid) * 10.0 + item["joint_cost"]
     return sorted(solutions, key=lambda solution: solution["cost"])
 
 
@@ -199,7 +252,7 @@ class CoordinateCanvas(QWidget):
         for x in range(-55, 55, 5):
             for y in range(-45, 45, 5):
                 cx, cy = x + 2.5, y + 2.5
-                reachable = bool(inverse_kinematics_negative_x(cx, cy))
+                reachable = quick_coordinate_reachable(cx, cy)
                 color = QColor(20, 100, 72, 48) if reachable else QColor(150, 35, 48, 38)
                 sx1, sy1 = self.to_screen(x, y + 5); sx2, sy2 = self.to_screen(x + 5, y)
                 painter.fillRect(int(sx1), int(sy1), int(sx2 - sx1 + 1), int(sy2 - sy1 + 1), color)
@@ -208,6 +261,28 @@ class CoordinateCanvas(QWidget):
         x1, y1 = self.to_screen(-10, 10); x2, y2 = self.to_screen(20, -10)
         painter.fillRect(int(x1), int(y1), int(x2 - x1), int(y2 - y1), QColor(210, 45, 55, 125))
         painter.setPen(QPen(QColor("#ff6375"), 2)); painter.drawRect(int(x1), int(y1), int(x2-x1), int(y2-y1))
+
+        # 物料区：X=-21..21、Y=-42.2..-15，按十字分为红黄蓝绿四筐。
+        bins = (
+            (-21.0, 0.0, -28.6, -15.0, QColor("#c83b4b"), "红"),
+            (0.0, 21.0, -28.6, -15.0, QColor("#d6a900"), "黄"),
+            (-21.0, 0.0, -42.2, -28.6, QColor("#286cc9"), "蓝"),
+            (0.0, 21.0, -42.2, -28.6, QColor("#269653"), "绿"),
+        )
+        for bx1, bx2, by1, by2, fill, label in bins:
+            left, top = self.to_screen(bx1, by2)
+            right, bottom = self.to_screen(bx2, by1)
+            painter.setPen(QPen(QColor("#e8f7ff"), 2))
+            painter.setBrush(QBrush(fill))
+            painter.drawRect(int(left), int(top), int(right-left), int(bottom-top))
+            center_x, center_y = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+            center_sx, center_sy = self.to_screen(center_x, center_y)
+            painter.setBrush(QBrush(QColor("#ffffff")))
+            painter.drawEllipse(int(center_sx-4), int(center_sy-4), 8, 8)
+            painter.drawLine(int(center_sx-9), int(center_sy), int(center_sx+9), int(center_sy))
+            painter.drawLine(int(center_sx), int(center_sy-9), int(center_sx), int(center_sy+9))
+            painter.drawText(int(center_sx+7), int(center_sy-6),
+                             "%s (%.1f, %.1f)" % (label, center_x, center_y))
 
         # 网格与数字刻度：5cm细网格，10cm标注。
         for x in range(-50, 51, 5):
@@ -372,7 +447,9 @@ class RemoteBackend(object):
             raise RuntimeError("WARN：传送带缺席，M4命令已跳过；机械臂其他轴仍可使用")
         if axis in self.pending_motions:
             raise RuntimeError("%s仍在运动中，请等待到位或超时" % axis)
-        factors = {"M1": PULSE_PER_DEG, "M2": PULSE_PER_LIFT_MM,
+        factors = {"M1": PULSE_PER_DEG,
+                   # 升降机械零点在最高处；逻辑位置向下为正，电机需发负脉冲。
+                   "M2": -PULSE_PER_LIFT_MM,
                    # 电机当前正脉冲方向与小臂规定的正角方向相反。
                    "M3": -PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
         pulses = int(round(amount * factors[axis]))
@@ -532,7 +609,7 @@ class RemoteWindow(QMainWindow):
         self.position_labels = {}
         self.motion_labels = {}
         definitions = (("M1 大臂", "M1", "°", 0.0, 0.0, 350.0),
-                       ("M2 升降", "M2", "mm", 0.0, 0.0, 120.0),
+                       ("M2 升降（0=最高，向下为正）", "M2", "mm", 0.0, 0.0, 100.0),
                        ("M3 小臂", "M3", "°", 28.5, 28.5, 300.0))
         self.axis_steps = {}
         self.axis_sliders = {}
@@ -579,7 +656,7 @@ class RemoteWindow(QMainWindow):
         pose_layout.addWidget(QLabel("连杆"), 4, 0)
         pose_layout.addWidget(QLabel("275 + 160 + 95 mm"), 4, 1)
         self.keep_negative_x = QCheckBox("夹爪保持 −X 方向")
-        self.keep_negative_x.setChecked(True)
+        self.keep_negative_x.setChecked(False)
         self.required_servo = QLabel("解算舵机：--")
         pose_layout.addWidget(self.keep_negative_x, 5, 0, 1, 2)
         pose_layout.addWidget(self.required_servo, 6, 0, 1, 2)
@@ -593,27 +670,41 @@ class RemoteWindow(QMainWindow):
         self.coordinate_canvas.targetSelected.connect(self.coordinate_canvas_clicked)
         layout.addWidget(self.coordinate_canvas, 3)
 
-        controls = QGroupBox("末端坐标 / 夹爪朝向 −X")
+        controls = QGroupBox("末端坐标 / 自由夹爪姿态")
         form = QGridLayout(controls)
         self.coord_x = QDoubleSpinBox(); self.coord_x.setRange(-55, 55)
         self.coord_y = QDoubleSpinBox(); self.coord_y.setRange(-45, 45)
         for box in (self.coord_x, self.coord_y):
             box.setDecimals(1); box.setSingleStep(0.5); box.setSuffix(" cm"); box.setMinimumHeight(40)
         self.coord_x.setValue(-28.2); self.coord_y.setValue(9.5)
+        self.coordinate_force_negative_x = False
+        self.coord_x.valueChanged.connect(self.coordinate_value_edited)
+        self.coord_y.valueChanged.connect(self.coordinate_value_edited)
         form.addWidget(QLabel("目标 X"), 0, 0); form.addWidget(self.coord_x, 0, 1)
         form.addWidget(QLabel("目标 Y"), 1, 0); form.addWidget(self.coord_y, 1, 1)
         solve = QPushButton("仅解算"); solve.setMinimumHeight(42); solve.clicked.connect(self.solve_coordinate)
         execute = QPushButton("执行目标"); execute.setObjectName("primary"); execute.setMinimumHeight(42)
         execute.clicked.connect(self.execute_coordinate)
         form.addWidget(solve, 2, 0); form.addWidget(execute, 2, 1)
+        waiting = QPushButton("到等待区"); waiting.setMinimumHeight(40)
+        waiting.clicked.connect(self.go_waiting_zone)
+        reset = QPushButton("整体复位"); reset.setObjectName("primary"); reset.setMinimumHeight(40)
+        reset.clicked.connect(self.go_home)
+        form.addWidget(waiting, 3, 0); form.addWidget(reset, 3, 1)
         self.touch_execute = QCheckBox("触摸可达点后自动执行")
-        self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 3, 0, 1, 2)
+        self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 4, 0, 1, 2)
+        bin_targets = (("红筐", -10.5, -21.8), ("黄筐", 10.5, -21.8),
+                       ("蓝筐", -10.5, -35.4), ("绿筐", 10.5, -35.4))
+        for index, (name, x, y) in enumerate(bin_targets):
+            button = QPushButton(name)
+            button.clicked.connect(lambda checked=False, tx=x, ty=y: self.select_bin_target(tx, ty))
+            form.addWidget(button, 5 + index // 2, index % 2)
         self.coord_result = QLabel("点击网格或输入坐标后解算")
-        self.coord_result.setWordWrap(True); self.coord_result.setMinimumHeight(120)
-        form.addWidget(self.coord_result, 4, 0, 1, 2)
-        legend = QLabel("绿色：可达  红色：不可达/禁入\n红色禁入区：X=-10～20，Y=-10～10\n执行顺序：M1 → M3 → 夹爪")
-        legend.setWordWrap(True); form.addWidget(legend, 5, 0, 1, 2)
-        form.setRowStretch(6, 1)
+        self.coord_result.setWordWrap(True); self.coord_result.setMinimumHeight(95)
+        form.addWidget(self.coord_result, 7, 0, 1, 2)
+        legend = QLabel("绿色：可达  红色：不可达/禁入\n彩色区：十字分割的红黄蓝绿物料筐\n执行顺序：M1 → M3 → 夹爪")
+        legend.setWordWrap(True); form.addWidget(legend, 8, 0, 1, 2)
+        form.setRowStretch(9, 1)
         layout.addWidget(controls, 1)
         return page
 
@@ -777,14 +868,25 @@ class RemoteWindow(QMainWindow):
         self.move_axis(axis, delta)
 
     def coordinate_canvas_clicked(self, x, y):
+        self.coordinate_force_negative_x = False
         self.coord_x.setValue(x); self.coord_y.setValue(y)
         solution = self.solve_coordinate()
         if solution is not None and self.touch_execute.isChecked():
             self.execute_coordinate()
 
+    def select_bin_target(self, x, y):
+        self.coord_x.setValue(x); self.coord_y.setValue(y)
+        self.coordinate_force_negative_x = False
+        self.solve_coordinate()
+
+    def coordinate_value_edited(self, value):
+        self.coordinate_force_negative_x = False
+
     def solve_coordinate(self, checked=False):
         x, y = self.coord_x.value(), self.coord_y.value()
-        solutions = inverse_kinematics_negative_x(
+        solver = (inverse_kinematics_negative_x if self.coordinate_force_negative_x
+                  else inverse_kinematics_flexible)
+        solutions = solver(
             x, y, self.backend.positions["M1"], self.backend.positions["M3"],
             self.backend.servo_rotate)
         reachable = bool(solutions)
@@ -799,28 +901,55 @@ class RemoteWindow(QMainWindow):
             return None
         self.coordinate_solution = solutions[0]
         s = self.coordinate_solution
-        self.coord_result.setText(
-            "可达 ✓\nM1 = %.2f°\nM3 = %.2f°\n旋转舵机 = %.2f°\n末端姿态 = 180°（−X）" %
-            (s["M1"], s["M3"], s["SERVO"]))
+        if self.coordinate_force_negative_x:
+            self.coord_result.setText(
+                "料筐中心可达 ✓\nM1=%.2f°  M3=%.2f°\n夹爪=%.2f°  末端姿态=180°（平行−X）" %
+                (s["M1"], s["M3"], s["SERVO"]))
+        else:
+            self.coord_result.setText(
+                "可达 ✓  舵机可行区间 %.1f°～%.1f°\nM1=%.2f°  M3=%.2f°\n夹爪取中间角≈%.2f°  末端姿态=%.1f°" %
+                (s["SERVO_MIN"], s["SERVO_MAX"], s["M1"], s["M3"],
+                 s["SERVO"], s["POSE"]))
         self.coord_result.setStyleSheet("color:#6cf0aa; font-weight:700")
         self.append_log("坐标解算：(%.1f, %.1f) → M1=%.2f M3=%.2f 舵机=%.2f" %
                         (x, y, s["M1"], s["M3"], s["SERVO"]))
         return s
 
-    def execute_coordinate(self, checked=False):
+    def start_coordinate_sequence(self, queue, label):
         if self.coordinate_active_axis or self.coordinate_queue or self.backend.pending_motions:
             QMessageBox.warning(self, "系统忙", "当前仍有运动任务，请等待到位")
-            return
+            return False
+        self.coordinate_queue = list(queue)
+        self.coord_result.setText(label)
+        self.append_log(label)
+        self.advance_coordinate_sequence()
+        return True
+
+    def go_waiting_zone(self, checked=False):
+        waiting_servo = servo_for_negative_x(0.0, 90.0, self.backend.servo_rotate)
+        self.start_coordinate_sequence([
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM),
+            ("M3", 90.0, self.speed.value()),
+            ("SERVO", waiting_servo, 0),
+        ], "前往等待区：M1=0°，M3=90°，夹爪=%.1f°（平行−X）" % waiting_servo)
+
+    def go_home(self, checked=False):
+        self.start_coordinate_sequence([
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM),
+            ("M3", 90.0, self.speed.value()),
+            ("SERVO", 127.0, 0),
+            ("M3", M3_HOME_DEG, self.speed.value()),
+        ], "安全复位：先回等待姿态，再收小臂至机械复位角")
+
+    def execute_coordinate(self, checked=False):
         solution = self.solve_coordinate()
         if solution is None:
             return
-        self.coordinate_queue = [
+        self.start_coordinate_sequence([
             ("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
             ("M3", solution["M3"], self.speed.value()),
             ("SERVO", solution["SERVO"], 0),
-        ]
-        self.append_log("坐标运动开始：先动大小臂，最后调整夹爪")
-        self.advance_coordinate_sequence()
+        ], "坐标运动开始：先动大小臂，最后将夹爪调到可行区间中值")
 
     def advance_coordinate_sequence(self):
         if not self.coordinate_queue:
@@ -836,7 +965,7 @@ class RemoteWindow(QMainWindow):
                 for line in self.backend.take_write_trace(): self.append_log(line)
                 self.rotate.setValue(command)
                 self.refresh_positions()
-                self.append_log("夹爪末端姿态已调整为−X，舵机=%d°" % command)
+                self.append_log("夹爪已调整到解算角度，舵机=%d°" % command)
                 self.advance_coordinate_sequence()
             except Exception as error:
                 self.coordinate_queue = []
