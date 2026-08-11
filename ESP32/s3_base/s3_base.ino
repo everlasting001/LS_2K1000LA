@@ -38,6 +38,7 @@ static const uint8_t FPGA_TX   = 17;   // → FPGA A15 router_rxd
 HardwareSerial FPGA_UART(2);
 
 // 将原始通信帧打印到 USB 调试串口（115200）。状态回包会限频，避免刷屏。
+static const uint32_t STATUS_LOG_INTERVAL_MS = 5000;
 static void debug_hex_frame(const char *label, const uint8_t *data, size_t len) {
     Serial.print(label);
     for (size_t i = 0; i < len; ++i) {
@@ -350,13 +351,13 @@ static void reply_loop() {
 
     FPGA_UART.write(r, sizeof(r));
 
-    // 内容变化时立即打印；内容不变时每秒打印一次心跳样本。
+    // 内容变化时立即打印；内容不变时每5秒打印一次心跳样本。
     static uint8_t last_logged[18] = {0};
     static bool have_last_logged = false;
     static uint32_t last_log_ms = 0;
     const uint32_t now = millis();
     if (!have_last_logged || memcmp(r, last_logged, sizeof(r)) != 0
-            || now - last_log_ms >= 1000) {
+            || now - last_log_ms >= STATUS_LOG_INTERVAL_MS) {
         debug_hex_frame("S3 -> FPGA TX: ", r, sizeof(r));
         memcpy(last_logged, r, sizeof(r));
         have_last_logged = true;

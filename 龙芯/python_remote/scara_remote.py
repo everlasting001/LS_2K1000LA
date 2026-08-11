@@ -14,7 +14,7 @@ from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
-    QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
+    QSlider, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
 )
 
 
@@ -38,6 +38,10 @@ CMD_EM, CMD_ESTOP, CMD_SERVO, CMD_BASE, CMD_ARM = 0x01, 0x02, 0x08, 0x40, 0x80
 PULSE_PER_DEG = 3200.0 * 3.75 / 360.0
 PULSE_PER_LIFT_MM = 3200.0 / 2.0
 PULSE_PER_CONVEYOR_MM = 3200.0 / (math.pi * 21.0)
+
+# 统一角度符号约定（俯视机械臂）：M1顺时针为正，M3逆时针为正，旋转舵机顺时针为正。
+ANGLE_DIRECTION_TEXT = "俯视方向：大臂顺时针为正，小臂逆时针为正，旋转舵机顺时针为正"
+HOME_POSITIONS = {"M1": 0.0, "M2": 0.0, "M3": 28.5, "M4": 0.0}
 
 
 class LinuxI2CBus(object):
@@ -78,7 +82,8 @@ class RemoteBackend(object):
         self.simulation = False
         self.connected = False
         self.write_trace = []
-        self.positions = {"M1": 0.0, "M2": 0.0, "M3": 0.0, "M4": 0.0}
+        # 机械复位姿态：M1=0°，M2=0mm，M3与大臂夹角=28.5°。
+        self.positions = dict(HOME_POSITIONS)
         self.raw_positions = {name: 0 for name in self.positions}
         self.servo_rotate = 127
         self.servo_grip = 80
@@ -169,7 +174,8 @@ class RemoteBackend(object):
         if axis == "M4" and not self.conveyor_online:
             raise RuntimeError("WARN：传送带缺席，M4命令已跳过；机械臂其他轴仍可使用")
         factors = {"M1": PULSE_PER_DEG, "M2": PULSE_PER_LIFT_MM,
-                   "M3": PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
+                   # 电机当前正脉冲方向与小臂规定的正角方向相反。
+                   "M3": -PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
         pulses = int(round(amount * factors[axis]))
         self._write_i32_be(REG_TARGETS[axis], pulses)
         partner = "M4" if axis == "M1" else "M1" if axis == "M4" else "M3" if axis == "M2" else "M2"
@@ -241,7 +247,7 @@ class RemoteWindow(QMainWindow):
         self.timer.start(500)
 
     def load_zero_data(self):
-        defaults = {"logical": {"M1": 0.0, "M2": 0.0, "M3": 0.0, "M4": 0.0},
+        defaults = {"logical": dict(HOME_POSITIONS),
                     "encoder_raw": {"M1": 0, "M2": 0, "M3": 0, "M4": 0}, "saved_at": "未校准"}
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as stream:
@@ -290,27 +296,42 @@ class RemoteWindow(QMainWindow):
 
     def axis_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
-        note = QLabel("所有运动均为相对运动；大臂/小臂输入角度，升降输入毫米。先低速小步测试方向。")
+        note = QLabel("拖动滑条选择目标位置，使用 −/＋ 按钮逐格微调，点击 OK 后才执行；%s。" % ANGLE_DIRECTION_TEXT)
         note.setObjectName("hint"); layout.addWidget(note)
         grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(8)
         grid.addWidget(QLabel("执行轴"), 0, 0); grid.addWidget(QLabel("当前位置"), 0, 1)
-        grid.addWidget(QLabel("单次步长"), 0, 2); grid.addWidget(QLabel("控制"), 0, 3)
+        grid.addWidget(QLabel("指定目标位置"), 0, 2); grid.addWidget(QLabel("精确调整"), 0, 3)
+        grid.addWidget(QLabel("执行"), 0, 4)
         self.position_labels = {}
-        definitions = (("M1 大臂", "M1", "°", 5.0, 0.1, 30.0),
-                       ("M2 升降", "M2", "mm", 5.0, 0.1, 30.0),
-                       ("M3 小臂", "M3", "°", 5.0, 0.1, 30.0))
+        definitions = (("M1 大臂", "M1", "°", 0.0, 0.0, 350.0),
+                       ("M2 升降", "M2", "mm", 0.0, 0.0, 120.0),
+                       ("M3 小臂", "M3", "°", 28.5, 28.5, 300.0))
         self.axis_steps = {}
+        self.axis_sliders = {}
         for row, (caption, axis, unit, value, minimum, maximum) in enumerate(definitions, 1):
             label = QLabel("0.00 %s" % unit); label.setObjectName("value"); self.position_labels[axis] = label
-            step = QDoubleSpinBox(); step.setRange(minimum, maximum); step.setDecimals(1); step.setValue(value); step.setSuffix(" " + unit)
+            slider = QSlider(Qt.Horizontal); slider.setRange(int(minimum * 10), int(maximum * 10)); slider.setValue(int(value * 10))
+            slider.setMinimumWidth(360); slider.setMinimumHeight(42); slider.setSingleStep(1); slider.setPageStep(10)
+            step = QDoubleSpinBox(); step.setRange(minimum, maximum); step.setDecimals(1); step.setSingleStep(1.0)
+            step.setValue(value); step.setSuffix(" " + unit); step.setMinimumWidth(105)
+            slider.valueChanged.connect(lambda raw, a=axis: self.axis_steps[a].setValue(raw / 10.0))
+            step.valueChanged.connect(lambda amount, a=axis: self.axis_sliders[a].setValue(int(round(amount * 10))))
+            adjust = QHBoxLayout(); minus = QPushButton("−"); plus = QPushButton("＋")
+            minus.setMinimumSize(46, 42); plus.setMinimumSize(46, 42)
+            minus.clicked.connect(lambda checked=False, a=axis: self.axis_steps[a].stepDown())
+            plus.clicked.connect(lambda checked=False, a=axis: self.axis_steps[a].stepUp())
+            adjust.addWidget(minus); adjust.addWidget(step); adjust.addWidget(plus)
+            ok = QPushButton("OK"); ok.setObjectName("axisOk"); ok.setMinimumSize(64, 42)
+            ok.clicked.connect(lambda checked=False, a=axis: self.send_axis_control(a))
             self.axis_steps[axis] = step
-            controls = QHBoxLayout(); minus = QPushButton("−"); plus = QPushButton("+")
-            minus.clicked.connect(lambda checked=False, a=axis: self.move_axis(a, -self.axis_steps[a].value()))
-            plus.clicked.connect(lambda checked=False, a=axis: self.move_axis(a, self.axis_steps[a].value()))
-            controls.addWidget(minus); controls.addWidget(plus)
-            grid.addWidget(QLabel(caption), row, 0); grid.addWidget(label, row, 1); grid.addWidget(step, row, 2); grid.addLayout(controls, row, 3)
+            self.axis_sliders[axis] = slider
+            grid.addWidget(QLabel(caption), row, 0); grid.addWidget(label, row, 1)
+            grid.addWidget(slider, row, 2); grid.addLayout(adjust, row, 3)
+            grid.addWidget(ok, row, 4)
         self.speed = QSpinBox(); self.speed.setRange(1, 3000); self.speed.setValue(300); self.speed.setSuffix(" RPM")
-        grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 2)
+        self.speed.setMinimumHeight(38)
+        grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 3)
+        grid.setColumnStretch(2, 1)
         layout.addLayout(grid); layout.addStretch(1); return page
 
     def actuator_tab(self):
@@ -348,14 +369,14 @@ class RemoteWindow(QMainWindow):
     def calibration_tab(self):
         page = QWidget(); layout = QHBoxLayout(page)
         zero_box = QGroupBox("机械零点校准"); zg = QGridLayout(zero_box)
-        zero_hint = QLabel("先手动将机构移动到机械零点，再点击对应按钮。校准只记录软件零点，不会驱动电机。")
+        zero_hint = QLabel("先手动将机构移动到机械复位姿态，再点击对应按钮。底层脉冲以机械点为0，安装角偏置由龙芯统一换算。")
         zero_hint.setWordWrap(True); zg.addWidget(zero_hint, 0, 0, 1, 3)
         self.zero_labels = {}
         for row, axis in enumerate(("M1", "M2", "M3", "M4"), 1):
             value = QLabel("raw=0"); self.zero_labels[axis] = value
-            button = QPushButton("设%s为零" % axis); button.clicked.connect(lambda checked=False, a=axis: self.calibrate_axis(a))
+            button = QPushButton("设%s为复位点" % axis); button.clicked.connect(lambda checked=False, a=axis: self.calibrate_axis(a))
             zg.addWidget(QLabel(axis), row, 0); zg.addWidget(value, row, 1); zg.addWidget(button, row, 2)
-        all_zero = QPushButton("全部设为机械零点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
+        all_zero = QPushButton("确认全部机械复位点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
         zg.addWidget(all_zero, 5, 0, 1, 3)
         self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 6, 0, 1, 3)
         layout.addWidget(zero_box, 1)
@@ -380,7 +401,11 @@ class RemoteWindow(QMainWindow):
             QPushButton,QSpinBox,QDoubleSpinBox,QComboBox { background:#10283d; border:1px solid #365b79; border-radius:4px; padding:5px; }
             QPushButton:hover { background:#1c4664; }
             QPushButton#primary { background:#087fa5; font-weight:700; }
+            QPushButton#axisOk { background:#087fa5; font-weight:700; font-size:14px; }
             QPushButton#estop { background:#a42335; border-color:#ff6375; font-weight:700; padding:7px 18px; }
+            QSlider::groove:horizontal { height:10px; background:#294762; border-radius:5px; }
+            QSlider::sub-page:horizontal { background:#16a4cc; border-radius:5px; }
+            QSlider::handle:horizontal { background:#e8f7ff; border:2px solid #16a4cc; width:28px; margin:-10px 0; border-radius:14px; }
             QTextEdit { background:#050e18; border:1px solid #294762; font-family:Consolas; }
         """)
 
@@ -421,6 +446,15 @@ class RemoteWindow(QMainWindow):
                          CMD_BASE if axis in ("M1", "M4") else CMD_ARM))
         self.refresh_positions()
 
+    def send_axis_control(self, axis):
+        target = self.axis_steps[axis].value()
+        current = self.backend.positions[axis]
+        delta = target - current
+        if abs(delta) < 0.0001:
+            self.append_log("%s 已在目标位置 %.1f，无需运动" % (axis, target))
+            return
+        self.move_axis(axis, delta)
+
     def send_servos(self):
         self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
                         "舵机命令：旋转=%d° 夹爪=%d°" % (self.rotate.value(), self.grip.value()))
@@ -434,18 +468,22 @@ class RemoteWindow(QMainWindow):
 
     def calibrate_axis(self, axis):
         self.zero_data["encoder_raw"][axis] = int(self.backend.raw_positions[axis])
-        self.zero_data["logical"][axis] = float(self.backend.positions[axis])
-        self.backend.positions[axis] = 0.0
+        self.zero_data["logical"][axis] = HOME_POSITIONS[axis]
+        self.backend.positions[axis] = HOME_POSITIONS[axis]
+        if axis in self.axis_steps:
+            self.axis_steps[axis].setValue(HOME_POSITIONS[axis])
         self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.save_zero_data(); self.append_log("%s当前位置设为软件零点" % axis); self.refresh_positions(); self.refresh_zero_labels()
+        self.save_zero_data(); self.append_log("%s当前位置设为机械复位点，逻辑位置=%.1f" % (axis, HOME_POSITIONS[axis])); self.refresh_positions(); self.refresh_zero_labels()
 
     def calibrate_all(self):
         for axis in ("M1", "M2", "M3", "M4"):
             self.zero_data["encoder_raw"][axis] = int(self.backend.raw_positions[axis])
-            self.zero_data["logical"][axis] = float(self.backend.positions[axis])
-            self.backend.positions[axis] = 0.0
+            self.zero_data["logical"][axis] = HOME_POSITIONS[axis]
+            self.backend.positions[axis] = HOME_POSITIONS[axis]
+            if axis in self.axis_steps:
+                self.axis_steps[axis].setValue(HOME_POSITIONS[axis])
         self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.save_zero_data(); self.append_log("四轴当前位置已设为机械零点"); self.refresh_positions(); self.refresh_zero_labels()
+        self.save_zero_data(); self.append_log("全部执行轴已同步到机械复位姿态"); self.refresh_positions(); self.refresh_zero_labels()
 
     def refresh_positions(self):
         for axis in ("M1", "M2", "M3"):
@@ -460,4 +498,28 @@ class RemoteWindow(QMainWindow):
 
     def poll_status(self):
         try:
-            state = self.backend.
+            state = self.backend.poll()
+            if state["status"] & 0x40:
+                self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
+                self.status_label.setStyleSheet("color:#6cf0aa")
+            else:
+                self.status_label.setText("WARN  传送带+四推杆缺席（机械臂可运行）  STATUS=0x%02X" % state["status"])
+                self.status_label.setStyleSheet("color:#f59e0b")
+            self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
+            self.refresh_zero_labels()
+        except Exception as error:
+            self.status_label.setText("读取失败：%s" % error)
+
+    def closeEvent(self, event):
+        self.backend.close(); super(RemoteWindow, self).closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("SCARA Remote")
+    window = RemoteWindow(); window.show()
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

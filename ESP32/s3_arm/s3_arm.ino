@@ -42,8 +42,8 @@ static const uint8_t M3_TX = 15;
 static const uint8_t ROTATE_PIN  = 4;     // 旋转舵机 (270° 数字舵机)
 static const uint8_t GRIPPER_PIN = 5;     // 夹爪舵机 (180° 数字舵机)
 
-// 通信超时: 1 秒无命令触发急停
-static const uint32_t LINK_TIMEOUT_MS = 1000;
+// 单次运动安全超时；系统采用一次下发、执行到位，不要求空闲时持续心跳。
+static const uint32_t MOTION_TIMEOUT_MS = 3000;
 
 // ============================================================
 // 二、状态变量
@@ -65,6 +65,7 @@ static uint16_t gripper_angle = 80;       // 夹爪舵机: 80° 张开
 static uint32_t last_valid_command = 0;   // 最后有效命令时间
 static uint8_t last_executed_seq = 0;
 static bool have_executed_seq = false;
+static uint8_t active_motion_mask = 0;    // bit0=M2，bit1=M3
 
 // 电机轮询控制
 static uint32_t last_motor_poll = 0;
@@ -161,6 +162,7 @@ static void process_receive(
     if (!packet_valid(p, CMD_MAGIC)) return;
 
     last_valid_command = millis();
+    status_packet.error &= ~0x04;
 
     // FPGA/路由层可能重发同一序列号；只回复状态，不重复驱动电机。
     if (have_executed_seq && p.seq == last_executed_seq) {
@@ -222,6 +224,7 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x02;
             emm_read_status(Serial2, M3_ADDR, status_packet.stat2);
+            if (status_packet.stat2 & 0x08) active_motion_mask &= ~0x02;
         }
     } else {
         // 轮询 M2 (升降, Serial1)
@@ -230,6 +233,7 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x01;
             emm_read_status(Serial1, M2_ADDR, status_packet.stat1);
+            if (status_packet.stat1 & 0x08) active_motion_mask &= ~0x01;
         }
     }
 }
@@ -306,6 +310,7 @@ void loop() {
                     status_packet.error |= 0x01;
                 } else {
                     status_packet.error &= ~0x09;
+                    active_motion_mask |= 0x01;
                 }
             }
 
@@ -319,6 +324,7 @@ void loop() {
                     status_packet.error |= 0x02;
                 } else {
                     status_packet.error &= ~0x0A;
+                    active_motion_mask |= 0x02;
                 }
             }
         }
@@ -346,10 +352,10 @@ void loop() {
         }
     }
 
-    // ---- 通信超时检测 ----
-    if (millis() - last_valid_command > LINK_TIMEOUT_MS) {
+    // ---- 运动超时检测：只有尚未到位的运动任务才计时 ----
+    if (active_motion_mask && millis() - last_valid_command > MOTION_TIMEOUT_MS) {
         emergency_stop();
-        last_valid_command = millis();
+        active_motion_mask = 0;
         status_packet.error |= 0x04;
     }
 
