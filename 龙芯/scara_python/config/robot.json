@@ -1,0 +1,23 @@
+{
+  "link1_mm": 250.0,
+  "link2_mm": 150.0,
+  "link3_mm": 100.0,
+  "joint1_min_deg": -120.0,
+  "joint1_max_deg": 120.0,
+  "joint2_min_deg": -145.0,
+  "joint2_max_deg": 145.0,
+  "joint3_min_deg": -127.0,
+  "joint3_max_deg": 143.0,
+  "servo_rotate_zero_deg": 127.0,
+  "servo_rotate_sign": 1.0,
+  "z_min_mm": 0.0,
+  "z_max_mm": 120.0,
+  "pulse_per_rev": 3200,
+  "joint_ratio": 3.75,
+  "lift_pitch_mm": 2.0,
+  "conveyor_diameter_mm": 21.0,
+  "i2c_bus": 1,
+  "i2c_address": 32,
+  "simulation": true,
+  "camera_index": 0
+}

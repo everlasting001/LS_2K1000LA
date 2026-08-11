@@ -1,0 +1,6 @@
+# 龙芯板优先使用LoongOS预装/apt软件包，不要直接安装x86 wheel。
+# 当前实机版本：Python 3.7.8、PyQt5/Qt 5.15.3、OpenCV 4.5.2、NumPy 1.19.5。
+PyQt5>=5.15,<6
+numpy>=1.19.5
+opencv-python>=4.5
+smbus2>=0.4

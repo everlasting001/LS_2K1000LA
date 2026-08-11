@@ -1,0 +1,33 @@
+{
+ "Device" : "GW5AT-60B",
+ "Files" : [
+  {
+   "Path" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/uart_tx.v",
+   "Type" : "verilog"
+  },
+  {
+   "Path" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/uart_rx.v",
+   "Type" : "verilog"
+  },
+  {
+   "Path" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/crc16.v",
+   "Type" : "verilog"
+  },
+  {
+   "Path" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/i2c_slave.v",
+   "Type" : "verilog"
+  },
+  {
+   "Path" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
+   "Type" : "verilog"
+  }
+ ],
+ "IncludePath" : [
+
+ ],
+ "LoopLimit" : 2000,
+ "ResultFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/impl/temp/rtl_parser.result",
+ "Top" : "top",
+ "VerilogStd" : "verilog_2001",
+ "VhdlStd" : "vhdl_93"
+}

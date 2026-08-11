@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Responsive SCARA manual remote for Loongson 2K1000LA (Python 3.7+)."""
+
+import json
+import math
+import os
+import sys
+import time
+
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QApplication, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
+    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
+)
+
+
+I2C_BUS = 1
+I2C_ADDRESS = 0x20
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zero_points.json")
+
+# FPGA register map v5
+REG_CMD = 0x00
+REG_SPEED_H, REG_SPEED_L = 0x05, 0x06
+REG_EM_MASK, REG_SERVO_ROTATE_L, REG_SERVO_GRIP_L = 0x0C, 0x0D, 0x0E
+REG_STATUS = 0x28
+REG_EM_DURATION, REG_EM_COOLDOWN = 0x2A, 0x2B
+REG_SERVO_ROTATE_H, REG_SERVO_GRIP_H = 0x2C, 0x2D
+REG_EM_STATE, REG_REMOTE_ERROR = 0x32, 0x33
+REG_TARGETS = {"M1": 0x40, "M2": 0x44, "M3": 0x48, "M4": 0x4C}
+REG_POSITIONS = {"M2": 0x10, "M3": 0x12, "M1": 0x18, "M4": 0x20}
+
+CMD_EM, CMD_ESTOP, CMD_SERVO, CMD_BASE, CMD_ARM = 0x01, 0x02, 0x08, 0x40, 0x80
+PULSE_PER_DEG = 3200.0 * 3.75 / 360.0
+PULSE_PER_LIFT_MM = 3200.0 / 2.0
+PULSE_PER_CONVEYOR_MM = 3200.0 / (math.pi * 21.0)
+
+
+class RemoteBackend(object):
+    def __init__(self):
+        self.bus = None
+        self.simulation = True
+        self.positions = {"M1": 0.0, "M2": 0.0, "M3": 0.0, "M4": 0.0}
+        self.raw_positions = {name: 0 for name in self.positions}
+        self.servo_rotate = 127
+        self.servo_grip = 80
+        self.em_state = 0
+        self.em_deadline = 0.0
+        self.remote_error = 0
+
+    def connect(self, simulation):
+        self.close()
+        self.simulation = simulation
+        if simulation:
+            return True, "模拟模式已连接"
+        try:
+            try:
+                from smbus2 import SMBus
+            except ImportError:
+                from smbus import SMBus
+            self.bus = SMBus(I2C_BUS)
+            self.bus.read_byte_data(I2C_ADDRESS, REG_STATUS)
+            return True, "真实I2C已连接：/dev/i2c-%d，地址0x%02X" % (I2C_BUS, I2C_ADDRESS)
+        except Exception as error:
+            self.bus = None
+            return False, "I2C连接失败：%s" % error
+
+    def close(self):
+        if self.bus is not None:
+            try:
+                self.bus.close()
+            except Exception:
+                pass
+        self.bus = None
+
+    def _write(self, register, value):
+        if self.simulation:
+            return
+        if self.bus is None:
+            raise RuntimeError("真实I2C尚未连接")
+        self.bus.write_byte_data(I2C_ADDRESS, register, value & 0xFF)
+
+    def _read(self, register):
+        if self.simulation:
+            return 0
+        if self.bus is None:
+            raise RuntimeError("真实I2C尚未连接")
+        return self.bus.read_byte_data(I2C_ADDRESS, register)
+
+    def _write_i16_be(self, register, value):
+        value = int(value) & 0xFFFF
+        self._write(register, value >> 8)
+        self._write(register + 1, value)
+
+    def _write_i32_be(self, register, value):
+        value = int(value)
+        if not -2147483648 <= value <= 2147483647:
+            raise ValueError("脉冲值超出int32范围")
+        unsigned = value & 0xFFFFFFFF
+        for offset, shift in enumerate((24, 16, 8, 0)):
+            self._write(register + offset, unsigned >> shift)
+
+    def _read_u16_be(self, register):
+        return (self._read(register) << 8) | self._read(register + 1)
+
+    def move(self, axis, amount, speed):
+        factors = {"M1": PULSE_PER_DEG, "M2": PULSE_PER_LIFT_MM,
+                   "M3": PULSE_PER_DEG, "M4": PULSE_PER_CONVEYOR_MM}
+        pulses = int(round(amount * factors[axis]))
+        self._write_i32_be(REG_TARGETS[axis], pulses)
+        partner = "M4" if axis == "M1" else "M1" if axis == "M4" else "M3" if axis == "M2" else "M2"
+        self._write_i32_be(REG_TARGETS[partner], 0)
+        self._write_i16_be(REG_SPEED_H, speed)
+        self._write(REG_CMD, CMD_BASE if axis in ("M1", "M4") else CMD_ARM)
+        self.positions[axis] += amount
+        self.raw_positions[axis] = (self.raw_positions[axis] + pulses) & 0xFFFF
+        return pulses
+
+    def set_servos(self, rotate, grip):
+        if not 0 <= rotate <= 270 or not 0 <= grip <= 180:
+            raise ValueError("舵机角度超出范围")
+        self._write(REG_SERVO_ROTATE_H, rotate >> 8)
+        self._write(REG_SERVO_ROTATE_L, rotate)
+        self._write(REG_SERVO_GRIP_H, grip >> 8)
+        self._write(REG_SERVO_GRIP_L, grip)
+        self._write(REG_CMD, CMD_SERVO)
+        self.servo_rotate, self.servo_grip = rotate, grip
+
+    def trigger_solenoid(self, index, duration_ms, cooldown_ms):
+        if index not in (1, 2, 3, 4):
+            raise ValueError("电磁铁编号无效")
+        duration = max(10, min(2000, duration_ms)) // 10
+        cooldown = max(0, min(2550, cooldown_ms)) // 10
+        self._write(REG_EM_MASK, 1 << (index - 1))
+        self._write(REG_EM_DURATION, duration)
+        self._write(REG_EM_COOLDOWN, cooldown)
+        self._write(REG_CMD, CMD_EM)
+        self.em_state = 1 << (index - 1)
+        self.em_deadline = time.monotonic() + duration_ms / 1000.0
+
+    def estop(self):
+        self._write(REG_CMD, CMD_ESTOP)
+        self.em_state = 0
+
+    def poll(self):
+        if self.simulation:
+            if self.em_state and time.monotonic() >= self.em_deadline:
+                self.em_state = 0
+            return {"status": 0x61, "error": self.remote_error,
+                    "em": self.em_state, "raw": dict(self.raw_positions)}
+        result = {"status": self._read(REG_STATUS), "error": self._read(REG_REMOTE_ERROR),
+                  "em": self._read(REG_EM_STATE), "raw": {}}
+        for axis, register in REG_POSITIONS.items():
+            result["raw"][axis] = self._read_u16_be(register)
+        self.raw_positions.update(result["raw"])
+        self.remote_error, self.em_state = result["error"], result["em"]
+        return result
+
+
+class RemoteWindow(QMainWindow):
+    def __init__(self):
+        super(RemoteWindow, self).__init__()
+        self.backend = RemoteBackend()
+        self.zero_data = self.load_zero_data()
+        self.setWindowTitle("龙芯 SCARA 简易遥控与零点校准")
+        self.setMinimumSize(760, 440)
+        self.build_ui()
+        self.apply_style()
+        self.connect_backend()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll_status)
+        self.timer.start(500)
+
+    def load_zero_data(self):
+        defaults = {"logical": {"M1": 0.0, "M2": 0.0, "M3": 0.0, "M4": 0.0},
+                    "encoder_raw": {"M1": 0, "M2": 0, "M3": 0, "M4": 0}, "saved_at": "未校准"}
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as stream:
+                loaded = json.load(stream)
+            defaults.update(loaded)
+        except Exception:
+            pass
+        return defaults
+
+    def save_zero_data(self):
+        with open(CONFIG_FILE, "w", encoding="utf-8") as stream:
+            json.dump(self.zero_data, stream, ensure_ascii=False, indent=2)
+
+    def build_ui(self):
+        root = QWidget()
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(7)
+        header = QHBoxLayout()
+        title = QLabel("SCARA 手动调试台")
+        title.setObjectName("title")
+        self.mode = QComboBox()
+        self.mode.addItems(("模拟模式", "真实I2C模式"))
+        self.connect_button = QPushButton("连接")
+        self.connect_button.clicked.connect(self.connect_backend)
+        self.connection = QLabel("未连接")
+        self.connection.setObjectName("connection")
+        self.estop_button = QPushButton("急停")
+        self.estop_button.setObjectName("estop")
+        self.estop_button.clicked.connect(self.estop)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.mode)
+        header.addWidget(self.connect_button)
+        header.addWidget(self.connection)
+        header.addWidget(self.estop_button)
+        outer.addLayout(header)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.axis_tab(), "轴遥控")
+        self.tabs.addTab(self.actuator_tab(), "舵机/传送带/电磁铁")
+        self.tabs.addTab(self.calibration_tab(), "零点校准与状态")
+        outer.addWidget(self.tabs, 1)
+        self.setCentralWidget(root)
+
+    def axis_tab(self):
+        page = QWidget(); layout = QVBoxLayout(page)
+        note = QLabel("所有运动均为相对运动；大臂/小臂输入角度，升降输入毫米。先低速小步测试方向。")
+        note.setObjectName("hint"); layout.addWidget(note)
+        grid = QGridLayout(); grid.setHorizontalSpacing(10); grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel("执行轴"), 0, 0); grid.addWidget(QLabel("当前位置"), 0, 1)
+        grid.addWidget(QLabel("单次步长"), 0, 2); grid.addWidget(QLabel("控制"), 0, 3)
+        self.position_labels = {}
+        definitions = (("M1 大臂", "M1", "°", 5.0, 0.1, 30.0),
+                       ("M2 升降", "M2", "mm", 5.0, 0.1, 30.0),
+                       ("M3 小臂", "M3", "°", 5.0, 0.1, 30.0))
+        self.axis_steps = {}
+        for row, (caption, axis, unit, value, minimum, maximum) in enumerate(definitions, 1):
+            label = QLabel("0.00 %s" % unit); label.setObjectName("value"); self.position_labels[axis] = label
+            step = QDoubleSpinBox(); step.setRange(minimum, maximum); step.setDecimals(1); step.setValue(value); step.setSuffix(" " + unit)
+            self.axis_steps[axis] = step
+            controls = QHBoxLayout(); minus = QPushButton("−"); plus = QPushButton("+")
+            minus.clicked.connect(lambda checked=False, a=axis: self.move_axis(a, -self.axis_steps[a].value()))
+            plus.clicked.connect(lambda checked=False, a=axis: self.move_axis(a, self.axis_steps[a].value()))
+            controls.addWidget(minus); controls.addWidget(plus)
+            grid.addWidget(QLabel(caption), row, 0); grid.addWidget(label, row, 1); grid.addWidget(step, row, 2); grid.addLayout(controls, row, 3)
+        self.speed = QSpinBox(); self.speed.setRange(1, 3000); self.speed.setValue(300); self.speed.setSuffix(" RPM")
+        grid.addWidget(QLabel("电机速度"), 4, 0); grid.addWidget(self.speed, 4, 2)
+        layout.addLayout(grid); layout.addStretch(1); return page
+
+    def actuator_tab(self):
+        page = QWidget(); main = QHBoxLayout(page)
+        left = QVBoxLayout(); servo_box = QGroupBox("舵机") ; sg = QGridLayout(servo_box)
+        self.rotate = QSpinBox(); self.rotate.setRange(0, 270); self.rotate.setValue(127); self.rotate.setSuffix("°")
+        self.grip = QSpinBox(); self.grip.setRange(0, 180); self.grip.setValue(80); self.grip.setSuffix("°")
+        send_servo = QPushButton("发送舵机角度"); send_servo.clicked.connect(self.send_servos)
+        sg.addWidget(QLabel("旋转舵机"), 0, 0); sg.addWidget(self.rotate, 0, 1)
+        sg.addWidget(QLabel("夹爪舵机"), 1, 0); sg.addWidget(self.grip, 1, 1); sg.addWidget(send_servo, 2, 0, 1, 2)
+        left.addWidget(servo_box)
+        conveyor = QGroupBox("传送带相对行程"); cg = QGridLayout(conveyor)
+        self.conveyor_mm = QDoubleSpinBox(); self.conveyor_mm.setRange(1, 30000); self.conveyor_mm.setValue(100); self.conveyor_mm.setSuffix(" mm")
+        self.conveyor_position = QLabel("0.0 mm"); self.conveyor_position.setObjectName("value")
+        back = QPushButton("反向"); forward = QPushButton("正向")
+        back.clicked.connect(lambda: self.move_axis("M4", -self.conveyor_mm.value()))
+        forward.clicked.connect(lambda: self.move_axis("M4", self.conveyor_mm.value()))
+        cg.addWidget(QLabel("累计位置"), 0, 0); cg.addWidget(self.conveyor_position, 0, 1)
+        cg.addWidget(QLabel("单次行程"), 1, 0); cg.addWidget(self.conveyor_mm, 1, 1)
+        cg.addWidget(back, 2, 0); cg.addWidget(forward, 2, 1); left.addWidget(conveyor); left.addStretch(1)
+
+        em_box = QGroupBox("推拉式电磁铁（高电平推出）"); eg = QGridLayout(em_box)
+        self.em_duration = QSpinBox(); self.em_duration.setRange(10, 2000); self.em_duration.setValue(200); self.em_duration.setSuffix(" ms")
+        self.em_cooldown = QSpinBox(); self.em_cooldown.setRange(0, 2550); self.em_cooldown.setValue(500); self.em_cooldown.setSuffix(" ms")
+        eg.addWidget(QLabel("推出时间"), 0, 0); eg.addWidget(self.em_duration, 0, 1)
+        eg.addWidget(QLabel("冷却时间"), 1, 0); eg.addWidget(self.em_cooldown, 1, 1)
+        for index in range(1, 5):
+            button = QPushButton("推出电磁铁 %d" % index)
+            button.clicked.connect(lambda checked=False, i=index: self.trigger_em(i))
+            eg.addWidget(button, 1 + (index + 1)//2, (index - 1) % 2)
+        self.em_label = QLabel("当前：全部缩回"); self.em_label.setObjectName("value")
+        eg.addWidget(self.em_label, 4, 0, 1, 2)
+        main.addLayout(left, 1); main.addWidget(em_box, 1); return page
+
+    def calibration_tab(self):
+        page = QWidget(); layout = QHBoxLayout(page)
+        zero_box = QGroupBox("机械零点校准"); zg = QGridLayout(zero_box)
+        zero_hint = QLabel("先手动将机构移动到机械零点，再点击对应按钮。校准只记录软件零点，不会驱动电机。")
+        zero_hint.setWordWrap(True); zg.addWidget(zero_hint, 0, 0, 1, 3)
+        self.zero_labels = {}
+        for row, axis in enumerate(("M1", "M2", "M3", "M4"), 1):
+            value = QLabel("raw=0"); self.zero_labels[axis] = value
+            button = QPushButton("设%s为零" % axis); button.clicked.connect(lambda checked=False, a=axis: self.calibrate_axis(a))
+            zg.addWidget(QLabel(axis), row, 0); zg.addWidget(value, row, 1); zg.addWidget(button, row, 2)
+        all_zero = QPushButton("全部设为机械零点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
+        zg.addWidget(all_zero, 5, 0, 1, 3)
+        self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 6, 0, 1, 3)
+        layout.addWidget(zero_box, 1)
+        status_box = QGroupBox("通信状态与日志"); sl = QVBoxLayout(status_box)
+        self.status_label = QLabel("STATUS=--  ERROR=--"); self.status_label.setObjectName("value"); sl.addWidget(self.status_label)
+        self.log = QTextEdit(); self.log.setReadOnly(True); self.log.document().setMaximumBlockCount(150); sl.addWidget(self.log, 1)
+        clear = QPushButton("清空日志"); clear.clicked.connect(self.log.clear); sl.addWidget(clear)
+        layout.addWidget(status_box, 1); return page
+
+    def apply_style(self):
+        self.setStyleSheet("""
+            QWidget { background:#081421; color:#dcecff; font-family:'Microsoft YaHei'; font-size:12px; }
+            QLabel#title { font-size:20px; font-weight:700; }
+            QLabel#value { color:#61d9ff; font-family:Consolas; font-weight:600; }
+            QLabel#hint { color:#8ba8c4; padding:3px; }
+            QLabel#connection { color:#6cf0aa; padding:0 6px; }
+            QTabWidget::pane,QGroupBox { border:1px solid #294762; border-radius:6px; }
+            QTabBar::tab { background:#10263a; padding:6px 18px; }
+            QTabBar::tab:selected { background:#087fa5; }
+            QGroupBox { margin-top:9px; padding:9px 6px 5px; font-weight:600; }
+            QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 4px; }
+            QPushButton,QSpinBox,QDoubleSpinBox,QComboBox { background:#10283d; border:1px solid #365b79; border-radius:4px; padding:5px; }
+            QPushButton:hover { background:#1c4664; }
+            QPushButton#primary { background:#087fa5; font-weight:700; }
+            QPushButton#estop { background:#a42335; border-color:#ff6375; font-weight:700; padding:7px 18px; }
+            QTextEdit { background:#050e18; border:1px solid #294762; font-family:Consolas; }
+        """)
+
+    def showEvent(self, event):
+        super(RemoteWindow, self).showEvent(event)
+        if not getattr(self, "screen_fitted", False):
+            area = QApplication.desktop().availableGeometry(self)
+            self.resize(min(1024, max(760, area.width() - 10)), min(600, max(440, area.height() - 10)))
+            self.screen_fitted = True
+
+    def append_log(self, text):
+        self.log.append("[%s] %s" % (time.strftime("%H:%M:%S"), text))
+
+    def connect_backend(self):
+        simulation = self.mode.currentIndex() == 0
+        ok, message = self.backend.connect(simulation)
+        self.connection.setText("● 已连接" if ok else "● 连接失败")
+        self.connection.setStyleSheet("color:%s" % ("#6cf0aa" if ok else "#ff6375"))
+        if hasattr(self, "log"):
+            self.append_log(message)
+
+    def run_action(self, action, success):
+        try:
+            result = action(); self.append_log(success(result) if callable(success) else success)
+        except Exception as error:
+            self.append_log("错误：%s" % error); QMessageBox.warning(self, "控制失败", str(error))
+
+    def move_axis(self, axis, amount):
+        units = {"M1": "°", "M2": "mm", "M3": "°", "M4": "mm"}
+        self.run_action(lambda: self.backend.move(axis, amount, self.speed.value()),
+                        lambda pulses: "%s 相对运动 %+.2f%s → %d脉冲" % (axis, amount, units[axis], pulses))
+        self.refresh_positions()
+
+    def send_servos(self):
+        self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
+                        "舵机命令：旋转=%d° 夹爪=%d°" % (self.rotate.value(), self.grip.value()))
+
+    def trigger_em(self, index):
+        self.run_action(lambda: self.backend.trigger_solenoid(index, self.em_duration.value(), self.em_cooldown.value()),
+                        "电磁铁%d推出%dms，冷却%dms" % (index, self.em_duration.value(), self.em_cooldown.value()))
+
+    def estop(self):
+        self.run_action(self.backend.estop, "全系统急停已发送；电磁铁全部缩回")
+
+    def calibrate_axis(self, axis):
+        self.zero_data["encoder_raw"][axis] = int(self.backend.raw_positions[axis])
+        self.zero_data["logical"][axis] = float(self.backend.positions[axis])
+        self.backend.positions[axis] = 0.0
+        self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.save_zero_data(); self.append_log("%s当前位置设为软件零点" % axis); self.refresh_positions(); self.refresh_zero_labels()
+
+    def calibrate_all(self):
+        for axis in ("M1", "M2", "M3", "M4"):
+            self.zero_data["encoder_raw"][axis] = int(self.backend.raw_positions[axis])
+            self.zero_data["logical"][axis] = float(self.backend.positions[axis])
+            self.backend.positions[axis] = 0.0
+        self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.save_zero_data(); self.append_log("四轴当前位置已设为机械零点"); self.refresh_positions(); self.refresh_zero_labels()
+
+    def refresh_positions(self):
+        for axis in ("M1", "M2", "M3"):
+            unit = "mm" if axis == "M2" else "°"
+            self.position_labels[axis].setText("%.2f %s" % (self.backend.positions[axis], unit))
+        self.conveyor_position.setText("%.1f mm" % self.backend.positions["M4"])
+
+    def refresh_zero_labels(self):
+        for axis, label in self.zero_labels.items():
+            label.setText("raw=%d" % self.zero_data["encoder_raw"].get(axis, 0))
+        self.saved_label.setText("校准时间：%s" % self.zero_data.get("saved_at", "未校准"))
+
+    def poll_status(self):
+        try:
+            state = self.backend.poll()
+            self.status_label.setText("STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
+            self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
+            self.refresh_zero_labels()
+        except Exception as error:
+            self.status_label.setText("读取失败：%s" % error)
+
+    def closeEvent(self, event):
+        self.backend.close(); super(RemoteWindow, self).closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("SCARA Remote")
+    window = RemoteWindow(); window.show()
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

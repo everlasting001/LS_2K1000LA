@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>1024</width><height>600</height></rect></property>
+  <property name="windowTitle"><string>SCARA Panel</string></property>
+  <widget class="QWidget" name="centralwidget">
+   <layout class="QVBoxLayout" name="mainLayout">
+    <property name="spacing"><number>2</number></property>
+    <item><widget class="QLabel" name="lbModeTitle"><property name="text"><string>SCARA 控制系统</string></property></widget></item>
+    <item><widget class="QStackedWidget" name="modeStack"/></item>
+   </layout>
+  </widget>
+ </widget>
+ <!--
+   代码创建的控件清单 (objectName):
+   遥控左栏: cardM1,cardM2,cardM3,cardM4,cardSV1,cardSV2
+   遥控马达行: slM1,slM2,slM3,slM4,slSV1,slSV2 (QSlider)
+   遥控步进: btnM1_m5,btnM1_m1,btnM1_p1,btnM1_p5 (同 M2/M3/M4 模式)
+   遥控舵机: btnSV1_m10,btnSV1_m2,btnSV1_p2,btnSV1_p10 (同 SV2)
+   遥控EM: btnEM1..btnEM4, btnEstop, btnBack
+   数据标签: lbM1Pos,lbM1Cur,lbM1Tmp,lbM1V (同 M2/M3/M4)
+   舵机标签: lbSV1Pos,lbSV2Pos
+   示教左栏: lbTCur1..lbTCur6 (当前位置M1-M4,SV1,SV2)
+   示教按钮: btnPlay(回放), btnTeachBack(返回)
+   示教路径表: tblWP (6行8列, 表头:步骤,M1,M3,M4,SV1,(空),M2,(状态))
+   示教传送带: lbSeg1..lbSeg4 (段距值), btnSeg1_m..btnSeg4_m, btnSeg1_p..btnSeg4_p
+   示教保存: btnSaveStep(保存当前步), btnSubmitAll(提交全部)
+   视觉左: camPreview (QLabel, 500x350), camStatus (QLabel)
+   视觉右: lbColorResult (QLabel), btnDetect (手动检测)
+   安全: 占位
+ -->
+</ui>
