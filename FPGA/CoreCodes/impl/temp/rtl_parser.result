@@ -1,49 +1,49 @@
 [
  {
-  "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/crc16.v",
+  "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/crc16.v",
   "InstLine" : 19,
   "InstName" : "crc16",
-  "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/crc16.v",
+  "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/crc16.v",
   "ModuleLine" : 19,
   "ModuleName" : "crc16"
  },
  {
-  "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-  "InstLine" : 20,
+  "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+  "InstLine" : 23,
   "InstName" : "top",
-  "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-  "ModuleLine" : 20,
+  "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+  "ModuleLine" : 23,
   "ModuleName" : "top",
   "SubInsts" : [
    {
-    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-    "InstLine" : 39,
+    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+    "InstLine" : 55,
     "InstName" : "u_i2c",
-    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/i2c_slave.v",
+    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/i2c_slave.v",
     "ModuleLine" : 18,
     "ModuleName" : "i2c_slave"
    },
    {
-    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-    "InstLine" : 52,
+    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+    "InstLine" : 70,
     "InstName" : "u_rx",
-    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/uart_rx.v",
+    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/uart_rx.v",
     "ModuleLine" : 19,
     "ModuleName" : "uart_rx"
    },
    {
-    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-    "InstLine" : 55,
+    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+    "InstLine" : 73,
     "InstName" : "u_tx",
-    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/uart_tx.v",
+    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/uart_tx.v",
     "ModuleLine" : 16,
     "ModuleName" : "uart_tx"
    },
    {
-    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/top.v",
-    "InstLine" : 61,
+    "InstFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/top.v",
+    "InstLine" : 79,
     "InstName" : "u_dbg",
-    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/CoreCodes/src/uart_tx.v",
+    "ModuleFile" : "E:/GOWIN_Project/FourAxisRobotsWithFPGA/2K1000LA/FPGA/CoreCodes/src/uart_tx.v",
     "ModuleLine" : 16,
     "ModuleName" : "uart_tx"
    }

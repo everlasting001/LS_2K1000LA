@@ -5,9 +5,9 @@
 // MAC:  44:1B:F6:83:E0:80
 // 角色:
 //   1. 接收 FPGA 通过 UART 发送的 13 字节帧，解析后通过
-//      ESP-NOW 转发到上臂 S3 和传送带 S3
+//      ESP-NOW 仅转发到上臂 S3
 //   2. 本地控制大臂 M1 (独占 Serial1, MODBUS-RTU)
-//   3. 汇总各执行端状态，每 20ms 通过 UART 返回给 FPGA (17 字节帧)
+//   3. 汇总核心状态，每 20ms 返回 FPGA；传送带缺席固定上报WARN
 // ============================================================
 
 #include <esp_now.h>
@@ -25,11 +25,6 @@ static uint8_t ARM_MAC[6] = {
     0x44, 0x1B, 0xF6, 0x81, 0xC4, 0xE0
 };
 
-// 传送带 S3 MAC 地址
-static uint8_t CONVEYOR_MAC[6] = {
-    0x44, 0x1B, 0xF6, 0x83, 0xDF, 0xD8
-};
-
 // UART 引脚分配
 // M1 (大臂) 独占 Serial1, 使用 Emm 出厂默认地址 1
 static const uint8_t M1_ADDR  = 1;
@@ -37,10 +32,21 @@ static const uint8_t M1_RX    = 2;
 static const uint8_t M1_TX    = 1;
 
 // FPGA UART (Serial2)
-static const uint8_t FPGA_RX   = 20;   // ← FPGA P19 router_txd
-static const uint8_t FPGA_TX   = 21;   // → FPGA A15 router_rxd
+static const uint8_t FPGA_RX   = 18;   // ← FPGA P19 router_txd
+static const uint8_t FPGA_TX   = 17;   // → FPGA A15 router_rxd
 
 HardwareSerial FPGA_UART(2);
+
+// 将原始通信帧打印到 USB 调试串口（115200）。状态回包会限频，避免刷屏。
+static void debug_hex_frame(const char *label, const uint8_t *data, size_t len) {
+    Serial.print(label);
+    for (size_t i = 0; i < len; ++i) {
+        if (data[i] < 0x10) Serial.print('0');
+        Serial.print(data[i], HEX);
+        if (i + 1 < len) Serial.print(' ');
+    }
+    Serial.println();
+}
 
 // ============================================================
 // 二、状态变量
@@ -48,17 +54,15 @@ HardwareSerial FPGA_UART(2);
 
 // 执行端状态缓存
 static StatusPacket arm_status;
-static StatusPacket conveyor_status;
 
 // 执行端在线状态跟踪 (500ms 无数据视为离线)
 static bool     arm_online        = false;
-static bool     conveyor_online   = false;
 static uint32_t arm_seen          = 0;     // 最后收到上臂状态的时间
-static uint32_t conveyor_seen     = 0;     // 最后收到传送带状态的时间
 
 // 本地 M1 电机状态
 static uint16_t m1_position       = 0;
 static uint8_t  m1_status         = 0;
+static uint8_t  base_error        = 0;
 static uint32_t last_m1_poll      = 0;     // 上一次轮询 M1 的时间
 
 // 通信控制
@@ -129,11 +133,6 @@ static void process_receive(
         arm_online = true;
         arm_seen   = millis();
     }
-    else if (!memcmp(mac, CONVEYOR_MAC, 6) && p.device == DEV_CONVEYOR) {
-        memcpy(&conveyor_status, &p, sizeof(p));
-        conveyor_online = true;
-        conveyor_seen   = millis();
-    }
 }
 
 // ESP-NOW 接收回调 (兼容 Arduino ESP32 v2 和 v3 API)
@@ -156,7 +155,7 @@ static void on_receive(
 // 五、急停
 // ============================================================
 
-// 全局急停: 停止本地 M1 + 广播急停到上臂和传送带
+// 全局急停: 停止本地 M1 + 发送急停到上臂
 static void estop_all() {
     emm_stop(Serial1, M1_ADDR);
 
@@ -164,7 +163,6 @@ static void estop_all() {
     c.flags = FLAG_ESTOP;
 
     send_packet(ARM_MAC, c);
-    send_packet(CONVEYOR_MAC, c);
 }
 
 // ============================================================
@@ -209,7 +207,12 @@ static void handle_fpga_frame(const uint8_t *f) {
     // ---- 大臂 M1 (bit5) — 本地控制 ----
     if (flags & 0x20) {
         uint16_t speed = param ? param : 300;  // 默认 300 RPM
-        emm_position(Serial1, M1_ADDR, v1, speed, true);
+        if (v1 < -12000 || v1 > 12000 || speed > 1000)
+            base_error |= 0x01;
+        else if (!emm_position(Serial1, M1_ADDR, v1, speed, true))
+            base_error |= 0x02;
+        else
+            base_error &= ~0x03;
     }
 
     // ---- 上臂 M2/M3 (bit1, bit2) — 转发到上臂 S3 ----
@@ -235,23 +238,7 @@ static void handle_fpga_frame(const uint8_t *f) {
         send_packet(ARM_MAC, c);
     }
 
-    // ---- 传送带 M4 (bit6) — 转发到传送带 S3 ----
-    if (flags & 0x40) {
-        CmdPacket c = new_command(CMD_MOVE);
-        c.value1 = v2;                          // M4 目标脉冲
-        c.speed1 = param ? param : 300;
-        c.flags  = FLAG_RELATIVE | FLAG_M2_ENABLE;  // 复用 M2_ENABLE 标志
-        send_packet(CONVEYOR_MAC, c);
-    }
-
-    // ---- 电磁铁 (bit7) — 转发到传送带 S3 ----
-    if (flags & 0x80) {
-        CmdPacket c = new_command(CMD_SOLENOID);
-        c.aux1   = (uint8_t)v1 & 0x0F;    // one-hot 掩码
-        c.aux2   = (uint8_t)v2;           // 动作时长 (10ms 单位)
-        c.speed2 = param;                 // 冷却时长 (10ms 单位)
-        send_packet(CONVEYOR_MAC, c);
-    }
+    // bit6(M4)和bit7(推杆)在当前实物中缺席：有意忽略，仅上报黄色WARN。
 }
 
 // ============================================================
@@ -273,8 +260,12 @@ static void uart_loop() {
 
         // 收满 13 字节，校验 CRC-8
         if (index == 13) {
+            debug_hex_frame("FPGA -> S3 RX: ", f, sizeof(f));
             if (crc8_ccitt(f, 12) == f[12]) {
+                Serial.println("FPGA RX CRC: OK");
                 handle_fpga_frame(f);
+            } else {
+                Serial.println("FPGA RX CRC: FAIL (frame ignored)");
             }
             index = 0;      // 重置，等待下一帧
         }
@@ -293,9 +284,11 @@ static void motor_poll() {
     if (!emm_read_position(Serial1, M1_ADDR, m1_position)) {
         // 读取失败，设置错误标志
         m1_status |= 0x80;
+        base_error |= 0x02;
     } else {
         m1_status &= 0x7F;
         emm_read_status(Serial1, M1_ADDR, m1_status);
+        base_error &= ~0x02;
     }
 }
 
@@ -303,19 +296,20 @@ static void motor_poll() {
 // 九、状态回复给 FPGA
 // ============================================================
 
-// 每 20ms 向 FPGA 发送 17 字节状态帧 (16 字节数据 + CRC8)
+// 每20ms向FPGA发送18字节状态帧（17字节数据+CRC8）
 // 格式:
 //   Byte 0:        0xAA (帧头)
 //   Byte 1:        在线标志 (bit0=M2在线, bit1=M3在线, bit5=M1在线, bit6=M4在线)
 //   Byte 2–3:      arm_status.pos1 (上臂 M2 位置)
 //   Byte 4–5:      arm_status.pos2 (上臂 M3 位置)
 //   Byte 6–7:      m1_position (本地 M1 位置)
-//   Byte 8–9:      conveyor_status.pos1 (传送带 M4 位置)
+//   Byte 8–9:      0（传送带缺席）
 //   Byte 10–11:    arm_status.aux1 (舵机1 角度)
 //   Byte 12–13:    arm_status.aux2 (舵机2 角度)
-//   Byte 14:       conveyor_status.aux1 (电磁铁掩码)
-//   Byte 15:       错误码 (低4位=上臂, 高4位=传送带)
-//   Byte 16:       CRC-8/CCITT (覆盖 Byte 0–15)
+//   Byte 14:       WARN: bit0传送带缺席 bit1推杆缺席
+//   Byte 15:       核心ERROR
+//   Byte 16:       DONE: bit0=M1 bit1=M2 bit2=M3 bit5=三轴全到位
+//   Byte 17:       CRC-8/CCITT
 
 static void reply_loop() {
     if (millis() - last_reply < 20) return;
@@ -323,14 +317,11 @@ static void reply_loop() {
 
     // 超时检测: 500ms 无数据视为离线
     arm_online      = arm_online      && (millis() - arm_seen      < 500);
-    conveyor_online = conveyor_online && (millis() - conveyor_seen < 500);
 
-    // 构造 17 字节状态帧
-    uint8_t r[17] = {
+    uint8_t r[18] = {
         0xAA,
         (uint8_t)(
             (arm_online      ? 0x06 : 0) |   // bit0=M2, bit1=M3
-            (conveyor_online ? 0x40 : 0) |   // bit6=M4
             0x20                              // bit5=M1 (本地总是在线)
         )
     };
@@ -344,20 +335,33 @@ static void reply_loop() {
     put16(2,  arm_status.pos1);         // M2 位置
     put16(4,  arm_status.pos2);         // M3 位置
     put16(6,  m1_position);             // M1 位置 (本地)
-    put16(8,  conveyor_status.pos1);    // M4 位置
+    put16(8,  0);                       // M4缺席
     put16(10, arm_status.aux1);         // 舵机1 角度
     put16(12, arm_status.aux2);         // 舵机2 角度
 
-    r[14] = conveyor_status.aux1;       // 电磁铁掩码
-
-    // 错误码: 低 4 位=上臂, 高 4 位=传送带
-    r[15] = (arm_status.error      & 0x0F)
-          | ((conveyor_status.error & 0x0F) << 4);
-
-    // CRC-8 校验
-    r[16] = crc8_ccitt(r, 16);
+    r[14] = 0x03; // 两个可选子系统缺席，固定WARN且不阻塞
+    r[15] = (base_error & 0x03) | ((arm_status.error & 0x0F) << 2)
+          | (!arm_online ? 0x40 : 0);
+    r[16] = ((m1_status & 0x08) ? 0x01 : 0)
+          | ((arm_status.stat1 & 0x08) ? 0x02 : 0)
+          | ((arm_status.stat2 & 0x08) ? 0x04 : 0) | 0x18;
+    if ((r[16] & 0x07) == 0x07) r[16] |= 0x20;
+    r[17] = crc8_ccitt(r, 17);
 
     FPGA_UART.write(r, sizeof(r));
+
+    // 内容变化时立即打印；内容不变时每秒打印一次心跳样本。
+    static uint8_t last_logged[18] = {0};
+    static bool have_last_logged = false;
+    static uint32_t last_log_ms = 0;
+    const uint32_t now = millis();
+    if (!have_last_logged || memcmp(r, last_logged, sizeof(r)) != 0
+            || now - last_log_ms >= 1000) {
+        debug_hex_frame("S3 -> FPGA TX: ", r, sizeof(r));
+        memcpy(last_logged, r, sizeof(r));
+        have_last_logged = true;
+        last_log_ms = now;
+    }
 }
 
 // ============================================================
@@ -370,6 +374,8 @@ void setup() {
 
     // 初始化 M1 电机 UART
     Serial1.begin(115200, SERIAL_8N1, M1_RX, M1_TX);
+    delay(100);
+    Serial.printf("M1 enable: %s\n", emm_enable(Serial1, M1_ADDR, true) ? "OK" : "FAIL");
 
     // 初始化 FPGA UART
     FPGA_UART.begin(115200, SERIAL_8N1, FPGA_RX, FPGA_TX);
@@ -385,9 +391,8 @@ void setup() {
 
     esp_now_register_recv_cb(on_receive);
 
-    // 注册两个执行端
+    // 当前只注册上臂核心执行端；不注册、不等待传送带节点
     add_peer(ARM_MAC);
-    add_peer(CONVEYOR_MAC);
 }
 
 void loop() {

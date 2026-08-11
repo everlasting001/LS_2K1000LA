@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import time
+import fcntl
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
@@ -29,6 +30,7 @@ REG_STATUS = 0x28
 REG_EM_DURATION, REG_EM_COOLDOWN = 0x2A, 0x2B
 REG_SERVO_ROTATE_H, REG_SERVO_GRIP_H = 0x2C, 0x2D
 REG_EM_STATE, REG_REMOTE_ERROR = 0x32, 0x33
+REG_DONE, REG_WARN = 0x34, 0x35
 REG_TARGETS = {"M1": 0x40, "M2": 0x44, "M3": 0x48, "M4": 0x4C}
 REG_POSITIONS = {"M2": 0x10, "M3": 0x12, "M1": 0x18, "M4": 0x20}
 
@@ -38,10 +40,44 @@ PULSE_PER_LIFT_MM = 3200.0 / 2.0
 PULSE_PER_CONVEYOR_MM = 3200.0 / (math.pi * 21.0)
 
 
+class LinuxI2CBus(object):
+    """Minimal /dev/i2c-* backend; no pip packages are required."""
+    I2C_SLAVE = 0x0703
+
+    def __init__(self, bus_number):
+        self.fd = os.open("/dev/i2c-%d" % bus_number, os.O_RDWR)
+
+    def _select(self, address):
+        fcntl.ioctl(self.fd, self.I2C_SLAVE, address)
+
+    def write_byte_data(self, address, register, value):
+        self._select(address)
+        written = os.write(self.fd, bytes(bytearray((register & 0xFF,
+                                                     value & 0xFF))))
+        if written != 2:
+            raise OSError("short I2C write: %d" % written)
+
+    def read_byte_data(self, address, register):
+        self._select(address)
+        if os.write(self.fd, bytes(bytearray((register & 0xFF,)))) != 1:
+            raise OSError("short I2C register write")
+        data = os.read(self.fd, 1)
+        if len(data) != 1:
+            raise OSError("short I2C read")
+        return bytearray(data)[0]
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
 class RemoteBackend(object):
     def __init__(self):
         self.bus = None
-        self.simulation = True
+        self.simulation = False
+        self.connected = False
+        self.write_trace = []
         self.positions = {"M1": 0.0, "M2": 0.0, "M3": 0.0, "M4": 0.0}
         self.raw_positions = {name: 0 for name in self.positions}
         self.servo_rotate = 127
@@ -54,16 +90,23 @@ class RemoteBackend(object):
     def connect(self, simulation):
         self.close()
         self.simulation = simulation
+        self.connected = False
+        self.write_trace = []
         self.conveyor_online = False
         if simulation:
+            self.connected = True
             return True, "模拟模式已连接"
         try:
             try:
                 from smbus2 import SMBus
             except ImportError:
-                from smbus import SMBus
+                try:
+                    from smbus import SMBus
+                except ImportError:
+                    SMBus = LinuxI2CBus
             self.bus = SMBus(I2C_BUS)
             self.bus.read_byte_data(I2C_ADDRESS, REG_STATUS)
+            self.connected = True
             return True, "真实I2C已连接：/dev/i2c-%d，地址0x%02X" % (I2C_BUS, I2C_ADDRESS)
         except Exception as error:
             self.bus = None
@@ -76,19 +119,34 @@ class RemoteBackend(object):
             except Exception:
                 pass
         self.bus = None
+        self.connected = False
 
     def _write(self, register, value):
+        if not self.connected:
+            raise RuntimeError("尚未连接，请先点击右上角“连接”")
+        value &= 0xFF
         if self.simulation:
+            self.write_trace.append("SIM REG[0x%02X] <- 0x%02X" % (register, value))
             return
         if self.bus is None:
             raise RuntimeError("真实I2C尚未连接")
-        self.bus.write_byte_data(I2C_ADDRESS, register, value & 0xFF)
+        self.bus.write_byte_data(I2C_ADDRESS, register, value)
+        self.write_trace.append("I2C REG[0x%02X] <- 0x%02X" % (register, value))
+
+    def take_write_trace(self):
+        trace = self.write_trace
+        self.write_trace = []
+        return trace
 
     def _read(self, register):
         if self.simulation:
             return 0
         if self.bus is None:
             raise RuntimeError("真实I2C尚未连接")
+        # Compatibility with the first FPGA I2C slave revision: its read data
+        # trails the requested register by one transaction. Reading the same
+        # address twice is harmless on the fixed revision and corrects the old.
+        self.bus.read_byte_data(I2C_ADDRESS, register)
         return self.bus.read_byte_data(I2C_ADDRESS, register)
 
     def _write_i16_be(self, register, value):
@@ -154,14 +212,16 @@ class RemoteBackend(object):
         if self.simulation:
             if self.em_state and time.monotonic() >= self.em_deadline:
                 self.em_state = 0
-            return {"status": 0x21, "error": self.remote_error,
+            return {"status": 0x23, "error": self.remote_error,
+                    "done": 0x3F, "warn": 0x03,
                     "em": self.em_state, "raw": dict(self.raw_positions)}
         result = {"status": self._read(REG_STATUS), "error": self._read(REG_REMOTE_ERROR),
+                  "done": self._read(REG_DONE), "warn": self._read(REG_WARN),
                   "em": self._read(REG_EM_STATE), "raw": {}}
         for axis, register in REG_POSITIONS.items():
             result["raw"][axis] = self._read_u16_be(register)
         self.raw_positions.update(result["raw"])
-        self.conveyor_online = bool(result["status"] & 0x40)
+        self.conveyor_online = False
         self.remote_error, self.em_state = result["error"], result["em"]
         return result
 
@@ -205,6 +265,7 @@ class RemoteWindow(QMainWindow):
         title.setObjectName("title")
         self.mode = QComboBox()
         self.mode.addItems(("模拟模式", "真实I2C模式"))
+        self.mode.setCurrentIndex(1)
         self.connect_button = QPushButton("连接")
         self.connect_button.clicked.connect(self.connect_backend)
         self.connection = QLabel("未连接")
@@ -343,14 +404,21 @@ class RemoteWindow(QMainWindow):
 
     def run_action(self, action, success):
         try:
-            result = action(); self.append_log(success(result) if callable(success) else success)
+            result = action()
+            for line in self.backend.take_write_trace():
+                self.append_log(line)
+            self.append_log(success(result) if callable(success) else success)
         except Exception as error:
+            for line in self.backend.take_write_trace():
+                self.append_log(line)
             self.append_log("错误：%s" % error); QMessageBox.warning(self, "控制失败", str(error))
 
     def move_axis(self, axis, amount):
         units = {"M1": "°", "M2": "mm", "M3": "°", "M4": "mm"}
         self.run_action(lambda: self.backend.move(axis, amount, self.speed.value()),
-                        lambda pulses: "%s 相对运动 %+.2f%s → %d脉冲" % (axis, amount, units[axis], pulses))
+                        lambda pulses: "%s 相对运动 %+.2f%s → %d脉冲，速度=%d，CMD=0x%02X（已写入FPGA）" %
+                        (axis, amount, units[axis], pulses, self.speed.value(),
+                         CMD_BASE if axis in ("M1", "M4") else CMD_ARM))
         self.refresh_positions()
 
     def send_servos(self):
@@ -392,28 +460,4 @@ class RemoteWindow(QMainWindow):
 
     def poll_status(self):
         try:
-            state = self.backend.poll()
-            if state["status"] & 0x40:
-                self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
-                self.status_label.setStyleSheet("color:#6cf0aa")
-            else:
-                self.status_label.setText("WARN  传送带+四推杆缺席（机械臂可运行）  STATUS=0x%02X" % state["status"])
-                self.status_label.setStyleSheet("color:#f59e0b")
-            self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
-            self.refresh_zero_labels()
-        except Exception as error:
-            self.status_label.setText("读取失败：%s" % error)
-
-    def closeEvent(self, event):
-        self.backend.close(); super(RemoteWindow, self).closeEvent(event)
-
-
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("SCARA Remote")
-    window = RemoteWindow(); window.show()
-    return app.exec_()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+            state = self.backend.

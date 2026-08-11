@@ -70,8 +70,8 @@
 | 26      | R18   | IOB144A   |                |
 | 27      | B16   | IOT97B    |                |
 | 28      | Y18   | IOB87A    |                |
-| 29      | A15   | IOT99A    | router_rxd：底盘 S3 GPIO21 → FPGA |
-| 30      | P19   | IOB113A   | router_txd：FPGA → 底盘 S3 GPIO20 |
+| 29      | A15   | IOT99A    | router_rxd：底盘 S3 GPIO17 → FPGA |
+| 30      | P19   | IOB113A   | router_txd：FPGA → 底盘 S3 GPIO18 |
 
 ---
 
@@ -139,8 +139,8 @@
 
 | 本端引脚 | 本端方向 | 通信对方 | 完整连接 | 参数 |
 |---|---|---|---|---|
-| FPGA P19 / `router_txd` | TX输出 | 底盘S3 GPIO20 / RX | FPGA P19 TX → 底盘S3 GPIO20 RX | 115200, 8N1 |
-| FPGA A15 / `router_rxd` | RX输入 | 底盘S3 GPIO21 / TX | FPGA A15 RX ← 底盘S3 GPIO21 TX | 115200, 8N1 |
+| FPGA P19 / `router_txd` | TX输出 | 底盘S3 GPIO18 / RX | FPGA P19 TX → 底盘S3 GPIO18 RX | 115200, 8N1 |
+| FPGA A15 / `router_rxd` | RX输入 | 底盘S3 GPIO17 / TX | FPGA A15 RX ← 底盘S3 GPIO17 TX | 115200, 8N1 |
 | FPGA T18 / `dbg_txd` | TX输出 | USB-TTL RX | FPGA T18 TX → USB-TTL RX | 115200, 8N1 |
 
 > FPGA 与底盘 S3 必须共地。P19/A15 均为 3.3V 逻辑，不可接 5V TTL。
@@ -150,7 +150,7 @@
 | 控制板本端 | TX连接的对方 | RX连接的对方 | 功能 |
 |---|---|---|---|
 | 底盘S3 GPIO1 TX / GPIO2 RX | GPIO1 TX → 大臂M1 RX | GPIO2 RX ← 大臂M1 TX | 大臂M1，Emm地址1 |
-| 底盘S3 GPIO21 TX / GPIO20 RX | GPIO21 TX → FPGA A15 RX | GPIO20 RX ← FPGA P19 TX | FPGA路由串口 |
+| 底盘S3 GPIO17 TX / GPIO18 RX | GPIO17 TX → FPGA A15 RX | GPIO18 RX ← FPGA P19 TX | FPGA路由串口 |
 | 上臂S3 GPIO17 TX / GPIO18 RX | GPIO17 TX → 升降M2 RX | GPIO18 RX ← 升降M2 TX | 升降M2，Emm地址1 |
 | 上臂S3 GPIO15 TX / GPIO16 RX | GPIO15 TX → 小臂M3 RX | GPIO16 RX ← 小臂M3 TX | 小臂M3，Emm地址1 |
 | 上臂S3 GPIO4 | — | — | 旋转舵机信号，0～270°，复位127° |
@@ -288,7 +288,7 @@
 | A8    | PCIE_RX0_N                        |
 | A10   | PCIE_RX2_N                        |
 | A13   | 蜂鸣器 PWM_beep                   |
-| A15   | GPIO 排针 29，router_rxd（←底盘S3 GPIO21） |
+| A15   | GPIO 排针 29，router_rxd（←底盘S3 GPIO17） |
 | AA18  | GPIO 排针 5 (IOB77A, 上拉 3.3V)   |
 | AB20  | 通用UART_TX → 外部USB-TTL RX（当前未使用） |
 | B2    | 矩阵键盘 row1                      |
@@ -358,7 +358,7 @@
 | P14   | GPIO 排针 6 (IOB146A)             |
 | P15   | GPIO 排针 10 (IOB142A)            |
 | P17   | GPIO 排针 18 (IOB140B)            |
-| P19   | GPIO 排针 30，router_txd（→底盘S3 GPIO20） |
+| P19   | GPIO 排针 30，router_txd（→底盘S3 GPIO18） |
 | R14   | 旋转编码器2 PulseA_2               |
 | R16   | GPIO 排针 8 (IOB142B)             |
 | R17   | GPIO 排针 22，空闲（旧版 EM2）     |

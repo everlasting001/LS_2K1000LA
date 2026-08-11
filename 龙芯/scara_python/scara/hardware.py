@@ -83,8 +83,10 @@ class I2cBackend(SimulatedBackend):
     Position animation remains local until the compact done/limit RX protocol
     is finalized; commands are sent to the real FPGA registers.
     """
-    REG_CMD, REG_M2, REG_M3, REG_SPEED = 0x00, 0x01, 0x03, 0x05
-    REG_M1, REG_M4, REG_SERVO1, REG_SERVO2, REG_STATUS = 0x08, 0x0A, 0x0D, 0x0E, 0x28
+    REG_CMD, REG_SPEED = 0x00, 0x05
+    REG_M1, REG_M2, REG_M3, REG_M4 = 0x40, 0x44, 0x48, 0x4C
+    REG_SERVO1, REG_SERVO2 = 0x0D, 0x0E
+    REG_STATUS, REG_ERROR, REG_DONE, REG_WARN = 0x28, 0x33, 0x34, 0x35
 
     def __init__(self, state, bus_number, address):
         super().__init__(state)
@@ -110,14 +112,45 @@ class I2cBackend(SimulatedBackend):
         self.bus.write_byte_data(self.address, register, value >> 8)
         self.bus.write_byte_data(self.address, register+1, value & 0xFF)
 
+    def _write_i32(self, register, value):
+        if not -2147483648 <= int(value) <= 2147483647:
+            raise ValueError("pulse value exceeds int32")
+        value = int(value) & 0xFFFFFFFF
+        for offset, shift in enumerate((24, 16, 8, 0)):
+            self.bus.write_byte_data(self.address, register + offset,
+                                     (value >> shift) & 0xFF)
+
+    def poll(self):
+        if self.bus is None:
+            return super().poll()
+        status = self.bus.read_byte_data(self.address, self.REG_STATUS)
+        error = self.bus.read_byte_data(self.address, self.REG_ERROR)
+        done = self.bus.read_byte_data(self.address, self.REG_DONE)
+        warn = self.bus.read_byte_data(self.address, self.REG_WARN)
+        self.state.router_online = True
+        self.state.base_online = bool(status & 0x20)
+        self.state.arm_online = bool(status & 0x03)
+        self.state.conveyor_online = False
+        self.state.last_warning = ("conveyor and pushers absent; arm remains available"
+                                   if warn & 0x03 else "none")
+        for index, mask in enumerate((0x01, 0x02, 0x04)):
+            self.state.axes[index].done = bool(done & mask)
+            self.state.axes[index].fault = bool(error)
+        if error:
+            self.state.motion = MotionState.FAULT
+        elif done & 0x20:
+            self.state.motion = MotionState.DONE
+
     def move_axes(self, deltas, speed, targets):
         if self.bus is None:
             raise RuntimeError("FPGA I²C未连接")
-        if any(not -32768 <= value <= 32767 for value in deltas):
+        if any(not -2147483648 <= value <= 2147483647 for value in deltas):
             raise ValueError("现有FPGA协议为int16，目标必须分段发送")
         m1, m2, m3, m4 = deltas
-        for register, value in ((self.REG_M2, m2), (self.REG_M3, m3), (self.REG_SPEED, speed), (self.REG_M1, m1), (self.REG_M4, m4)):
-            self._write_i16(register, value)
+        for register, value in ((self.REG_M1, m1), (self.REG_M2, m2),
+                                (self.REG_M3, m3), (self.REG_M4, 0)):
+            self._write_i32(register, value)
+        self._write_i16(self.REG_SPEED, speed)
         self.bus.write_byte_data(self.address, self.REG_CMD, 0xC0)
         return super().move_axes(deltas, speed, targets)
 

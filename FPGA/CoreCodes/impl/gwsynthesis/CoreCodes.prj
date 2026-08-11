@@ -4,18 +4,18 @@
     <Version>beta</Version>
     <Device id="GW5AT-60B" package="PBGA484A" speed="1" partNumber="GW5AT-LV60PG484AC1/I0"/>
     <FileList>
-        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_tx.v" type="verilog"/>
-        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_rx.v" type="verilog"/>
-        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\crc16.v" type="verilog"/>
-        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\i2c_slave.v" type="verilog"/>
-        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v" type="verilog"/>
+        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_tx.v" type="verilog"/>
+        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_rx.v" type="verilog"/>
+        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\crc16.v" type="verilog"/>
+        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\i2c_slave.v" type="verilog"/>
+        <File path="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v" type="verilog"/>
     </FileList>
     <OptionList>
         <Option type="disable_insert_pad" value="0"/>
         <Option type="enable_dsrm" value="0"/>
         <Option type="global_freq" value="100.000"/>
         <Option type="looplimit" value="2000"/>
-        <Option type="output_file" value="E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg"/>
+        <Option type="output_file" value="E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg"/>
         <Option type="print_all_synthesis_warning" value="0"/>
         <Option type="ram_rw_check" value="0"/>
         <Option type="top_module" value="top"/>

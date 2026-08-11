@@ -204,6 +204,10 @@ module i2c_slave #(
                     end
                     if (scl_fall && bit_cnt == 4'd8) begin
                         reg_addr  <= shift_reg;
+                        // SMBus read_byte_data uses W+register+RESTART+R.
+                        // Publish the requested address here so tx_data has a
+                        // full system-clock interval to settle before read ACK.
+                        tx_addr_reg <= shift_reg;
                         state     <= S_ACK_REG;
                         sda_out   <= 1'b0;         // ACK
                     end

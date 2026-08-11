@@ -35,8 +35,8 @@ GW5AT-60K FPGA（校验、限幅状态、UART转发）
 
 | 信号 | FPGA本端 | 通信对方 | 完整连接 |
 |---|---|---|---|
-| `router_txd` | P19 / J14-30，TX输出 | 底盘S3 GPIO20 RX | FPGA P19 TX → 底盘S3 GPIO20 RX |
-| `router_rxd` | A15 / J14-29，RX输入 | 底盘S3 GPIO21 TX | FPGA A15 RX ← 底盘S3 GPIO21 TX |
+| `router_txd` | P19 / J14-30，TX输出 | 底盘S3 GPIO18 RX | FPGA P19 TX → 底盘S3 GPIO18 RX |
+| `router_rxd` | A15 / J14-29，RX输入 | 底盘S3 GPIO17 TX | FPGA A15 RX ← 底盘S3 GPIO17 TX |
 | GND | GND | GND | 必须共地 |
 
 双方均为3.3V逻辑。不要使用5V TTL电平。
@@ -51,8 +51,8 @@ MAC：`44:1B:F6:83:E0:80`
 |---|---|---|
 | GPIO1 TX | 大臂M1 RX | S3 GPIO1 TX → M1 RX |
 | GPIO2 RX | 大臂M1 TX | S3 GPIO2 RX ← M1 TX |
-| GPIO20 RX | FPGA P19 TX / router_txd | S3 GPIO20 RX ← FPGA P19 TX |
-| GPIO21 TX | FPGA A15 RX / router_rxd | S3 GPIO21 TX → FPGA A15 RX |
+| GPIO18 RX | FPGA P19 TX / router_txd | S3 GPIO18 RX ← FPGA P19 TX |
+| GPIO17 TX | FPGA A15 RX / router_rxd | S3 GPIO17 TX → FPGA A15 RX |
 
 ### 4.2 上臂 S3
 
@@ -171,3 +171,9 @@ SV1(2) SV2(2) EM_state error CRC8
 | 底盘S3 | `2K1000LA/ESP32/s3_base` |
 | 上臂S3 | `2K1000LA/ESP32/s3_arm` |
 | 传送带S3 | `2K1000LA/ESP32/s3_conveyor` |
+
+## 10. 当前无传送带实机覆盖说明（2026-08-11）
+
+上述传送带 S3、M4、GPIO7～10 推杆引脚仅作为历史设计记录，现场不接线、不烧录。FPGA 的底盘命令只发送 M1（flag `0x20`），旧 M4/推杆命令被兼容接收后直接跳过。
+
+底盘 S3 → FPGA 当前为 18 字节状态帧：byte14 为黄色告警（固定 `0x03`，表示传送带和推杆缺席），byte15 为机械臂核心错误，byte16 为到位标志，byte17 为 CRC-8。FPGA I2C 增加：`0x34=DONE`、`0x35=WARN`；`0x33` 仅表示核心错误。WARN 不参与 BUSY，也不阻塞 M1/M2/M3/舵机动作。

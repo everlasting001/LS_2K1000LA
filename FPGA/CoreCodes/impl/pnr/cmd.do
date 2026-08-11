@@ -1,9 +1,9 @@
--d E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg
+-d E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg
 -p GW5AT-60B-PBGA484A-1
 -pn GW5AT-LV60PG484AC1/I0
--cst E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\constraints\pin_constraints.cst
--cfg E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\impl\pnr\device.cfg
--sdc E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\constraints\timing_constraints.sdc
+-cst E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\constraints\pin_constraints.cst
+-cfg E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\impl\pnr\device.cfg
+-sdc E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\constraints\timing_constraints.sdc
 -bit
 -tr
 -ph

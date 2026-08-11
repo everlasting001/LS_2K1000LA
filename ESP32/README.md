@@ -18,8 +18,8 @@ Arduino IDE 每次只打开对应目录中同名的 `.ino` 文件并选择 ESP32
 
 - 底盘S3 GPIO1 TX → 大臂M1 RX
 - 底盘S3 GPIO2 RX ← 大臂M1 TX
-- 底盘S3 GPIO20 RX ← FPGA P19 `router_txd` TX
-- 底盘S3 GPIO21 TX → FPGA A15 `router_rxd` RX
+- 底盘S3 GPIO18 RX ← FPGA P19 `router_txd` TX (J14 30)
+- 底盘S3 GPIO17 TX → FPGA A15 `router_rxd` RX (J14 29)
 - 所有设备必须共地
 
 ### 上臂 S3
@@ -62,6 +62,14 @@ AA flags value1[0] value1[1] value1[2] value1[3]
 ```
 
 `value1/value2` 为小端 `int32_t`，范围 `-2147483648～2147483647`；`flags`：bit1=M2、bit2=M3、bit3=舵机、bit4=急停、bit5=M1、bit6=M4、bit7=电磁铁。无线段使用带版本号、设备号和CRC-8/0x07的v3协议。
+
+## 无传送带实机协议（当前生效）
+
+- 现场仅烧录 `s3_base` 与 `s3_arm`；`s3_conveyor` 只保留为历史设计记录。
+- 底盘 S3 不注册、不轮询传送带节点，也不转发 M4/推杆命令。
+- 底盘回 FPGA 状态帧为 18 字节：前 14 字节位置/舵机，byte14=`WARN`，byte15=`ERROR`，byte16=`DONE`，byte17=`CRC-8/0x07`。
+- `WARN bit0` 表示传送带缺席，`bit1` 表示四路推杆缺席；它们不阻塞机械臂。
+- `DONE bit0/1/2` 分别为 M1/M2/M3，bit3/4 为旋转/夹爪舵机，bit5 为机械臂核心全部到位。
 
 UART 与 ESP-NOW 两段都使用 CRC-8（多项式 `0x07`）。底盘返回 FPGA 的帧为16字节数据加1字节 CRC；校验失败的帧会被丢弃。聚合状态包含 M1～M4 位置、两个16位舵机角、电磁铁状态和通信错误。各执行端约每100 ms读取一次 Emm 位置/状态，ESP-NOW 状态约每50 ms返回；无需龙芯高频轮询。
 

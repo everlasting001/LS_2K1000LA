@@ -40,9 +40,9 @@ module top (
         input [95:0] data; integer k; reg [7:0] c;
         begin c=0; for(k=0;k<12;k=k+1)c=crc8_byte(c,data[k*8 +: 8]); crc8_frame12=c; end
     endfunction
-    function [7:0] crc8_frame16;
-        input [127:0] data; integer k; reg [7:0] c;
-        begin c=0; for(k=0;k<16;k=k+1)c=crc8_byte(c,data[k*8 +: 8]); crc8_frame16=c; end
+    function [7:0] crc8_frame17;
+        input [135:0] data; integer k; reg [7:0] c;
+        begin c=0; for(k=0;k<17;k=k+1)c=crc8_byte(c,data[k*8 +: 8]); crc8_frame17=c; end
     endfunction
 
     //==========================================================================
@@ -96,6 +96,14 @@ module top (
     wire cmd_servo= reg_cmd[3];        // 发送舵机帧
     wire cmd_stop = reg_cmd[1];        // 急停
     wire cmd_em   = reg_cmd[0];        // 电磁铁命令
+    wire invalid_speed = (reg_speed == 16'd0) || (reg_speed > 16'd1000);
+    wire invalid_m1 = ($signed(reg_m1_pulse) < -32'sd12000) ||
+                      ($signed(reg_m1_pulse) >  32'sd12000);
+    wire invalid_m2 = ($signed(reg_m2_pulse) < -32'sd192000) ||
+                      ($signed(reg_m2_pulse) >  32'sd192000);
+    wire invalid_m3 = ($signed(reg_m3_pulse) < -32'sd10000) ||
+                      ($signed(reg_m3_pulse) >  32'sd10000);
+    wire invalid_servo = (reg_sv1 > 16'd270) || (reg_sv2 > 16'd180);
 
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
@@ -169,6 +177,11 @@ module top (
             8'h31: i2c_tx_data = reg_sv2_pos;       // 舵机2 实际角度: [7]=busy, [2:0]=active_idx
             8'h32: i2c_tx_data = {4'd0, reg_em_state};
             8'h33: i2c_tx_data = reg_remote_error;
+            8'h34: i2c_tx_data = reg_done_flags;
+            8'h35: i2c_tx_data = reg_warn_flags;
+            8'h36: i2c_tx_data = reg_reject_reason;
+            8'h37: i2c_tx_data = reg_reject_count[15:8];
+            8'h38: i2c_tx_data = reg_reject_count[7:0];
             default: i2c_tx_data = 8'h00;
         endcase
     end
@@ -189,6 +202,8 @@ module top (
     reg [15:0] tx_spd;
     reg tx_done;
     reg tx_is_both;
+    reg [7:0] reg_reject_reason;
+    reg [15:0] reg_reject_count;
     wire [7:0] tx_crc = crc8_frame12({tx_spd[15:8],tx_spd[7:0],
         tx_val2[31:24],tx_val2[23:16],tx_val2[15:8],tx_val2[7:0],
         tx_val1[31:24],tx_val1[23:16],tx_val1[15:8],tx_val1[7:0],tx_flags,8'hAA});
@@ -200,6 +215,7 @@ module top (
             tx_state <= TX_IDLE; tx_idx <= 4'd0;
             tx_start <= 1'b0; tx_byte <= 8'd0; tx_done <= 1'b0; tx_is_both <= 1'b0;
             tx_flags <= 8'd0; tx_val1 <= 32'd0; tx_val2 <= 32'd0; tx_spd <= 16'd0;
+            reg_reject_reason <= 8'd0; reg_reject_count <= 16'd0;
         end else begin
             tx_start <= 1'b0; tx_done <= 1'b0;
 
@@ -211,27 +227,45 @@ module top (
                     tx_idx <= 4'd0; tx_state <= TX_BYTE;
                 end
                 else if (cmd_em) begin
-                    tx_flags <= 8'h80; tx_val1 <= {28'd0, em_target};
-                    tx_val2 <= {24'd0, em_duration}; tx_spd <= {8'd0, em_cooldown};
-                    tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    // 无传送带实机版：四路推杆固定缺席。兼容旧命令但不发往外设。
+                    tx_done <= 1'b1; tx_state <= TX_DONE;
                 end
                 else if (cmd_servo) begin
-                    tx_flags <= 8'h08; tx_val1 <= {16'd0, reg_sv1}; tx_val2 <= {16'd0, reg_sv2};
-                    tx_spd <= 16'd0; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    if (invalid_servo) begin
+                        reg_reject_reason <= 8'h04; reg_reject_count <= reg_reject_count + 16'd1;
+                        tx_done <= 1'b1; tx_state <= TX_DONE;
+                    end else begin
+                        tx_flags <= 8'h08; tx_val1 <= {16'd0, reg_sv1}; tx_val2 <= {16'd0, reg_sv2};
+                        tx_spd <= 16'd0; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    end
                 end
                 else if (cmd_both) begin
-                    // 先发 ARM 帧, 然后自动接 BASE 帧
-                    tx_flags <= 8'h06; tx_val1 <= reg_m2_pulse; tx_val2 <= reg_m3_pulse;
-                    tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
-                    tx_is_both <= 1'b1;
+                    if (invalid_speed || invalid_m1 || invalid_m2 || invalid_m3) begin
+                        reg_reject_reason <= 8'h01; reg_reject_count <= reg_reject_count + 16'd1;
+                        tx_done <= 1'b1; tx_state <= TX_DONE;
+                    end else begin
+                        tx_flags <= 8'h06; tx_val1 <= reg_m2_pulse; tx_val2 <= reg_m3_pulse;
+                        tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                        tx_is_both <= 1'b1;
+                    end
                 end
                 else if (cmd_arm) begin
-                    tx_flags <= 8'h06; tx_val1 <= reg_m2_pulse; tx_val2 <= reg_m3_pulse;
-                    tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    if (invalid_speed || invalid_m2 || invalid_m3) begin
+                        reg_reject_reason <= 8'h02; reg_reject_count <= reg_reject_count + 16'd1;
+                        tx_done <= 1'b1; tx_state <= TX_DONE;
+                    end else begin
+                        tx_flags <= 8'h06; tx_val1 <= reg_m2_pulse; tx_val2 <= reg_m3_pulse;
+                        tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    end
                 end
                 else if (cmd_base) begin
-                    tx_flags <= 8'h60; tx_val1 <= reg_m1_pulse; tx_val2 <= reg_m4_pulse;
-                    tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    if (invalid_speed || invalid_m1) begin
+                        reg_reject_reason <= 8'h03; reg_reject_count <= reg_reject_count + 16'd1;
+                        tx_done <= 1'b1; tx_state <= TX_DONE;
+                    end else begin
+                        tx_flags <= 8'h20; tx_val1 <= reg_m1_pulse; tx_val2 <= 32'd0;
+                        tx_spd <= reg_speed; tx_idx <= 4'd0; tx_state <= TX_BYTE;
+                    end
                 end
                 else if (self_trig) begin
                     tx_flags <= self_flags; tx_val1 <= self_val1; tx_val2 <= self_val2;
@@ -239,24 +273,24 @@ module top (
                 end
             end
 
-            TX_BASE: begin   // cmd_both 的第二帧: BASE (M1+M4)
+            TX_BASE: begin   // cmd_both 的第二帧: BASE (仅M1)
                 if (s_tx_ready && !tx_start) begin
                     case (tx_idx)
                         4'd0: tx_byte <= 8'hAA;
-                        4'd1: tx_byte <= 8'h60;    // M1+M4 flags
+                        4'd1: tx_byte <= 8'h20;    // 仅M1
                         4'd2: tx_byte <= reg_m1_pulse[7:0];
                         4'd3: tx_byte <= reg_m1_pulse[15:8];
                         4'd4: tx_byte <= reg_m1_pulse[23:16];
                         4'd5: tx_byte <= reg_m1_pulse[31:24];
-                        4'd6: tx_byte <= reg_m4_pulse[7:0];
-                        4'd7: tx_byte <= reg_m4_pulse[15:8];
-                        4'd8: tx_byte <= reg_m4_pulse[23:16];
-                        4'd9: tx_byte <= reg_m4_pulse[31:24];
+                        4'd6: tx_byte <= 8'd0;
+                        4'd7: tx_byte <= 8'd0;
+                        4'd8: tx_byte <= 8'd0;
+                        4'd9: tx_byte <= 8'd0;
                         4'd10: tx_byte <= reg_speed[7:0];
                         4'd11: tx_byte <= reg_speed[15:8];
                         4'd12: tx_byte <= crc8_frame12({reg_speed[15:8],reg_speed[7:0],
-                            reg_m4_pulse[31:24],reg_m4_pulse[23:16],reg_m4_pulse[15:8],reg_m4_pulse[7:0],
-                            reg_m1_pulse[31:24],reg_m1_pulse[23:16],reg_m1_pulse[15:8],reg_m1_pulse[7:0],8'h60,8'hAA});
+                            32'd0,
+                            reg_m1_pulse[31:24],reg_m1_pulse[23:16],reg_m1_pulse[15:8],reg_m1_pulse[7:0],8'h20,8'hAA});
                         default: tx_byte <= 8'h00;
                     endcase
                     tx_start <= 1'b1;
@@ -389,15 +423,15 @@ module top (
     end
 
     //==========================================================================
-    // 底盘S3响应 — 17字节: 16字节数据 + CRC-8/0x07
+    // 底盘S3响应 — 18字节: 17字节数据 + CRC-8/0x07
     //==========================================================================
-    reg [4:0]  rx_idx;        // 0-16
-    reg [135:0] rx_buf;
+    reg [4:0]  rx_idx;        // 0-17
+    reg [143:0] rx_buf;
     reg        rx_got;
 
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
-            rx_idx <= 5'd0; rx_buf <= 136'd0; rx_got <= 1'b0;
+            rx_idx <= 5'd0; rx_buf <= 144'd0; rx_got <= 1'b0;
         end else begin
             rx_got <= 1'b0;
 
@@ -405,10 +439,10 @@ module top (
                 if (rx_idx == 0 && s_rx_data == 8'hAA) begin
                     rx_idx <= 5'd1;
                     rx_buf[7:0] <= 8'hAA;
-                end else if (rx_idx > 0 && rx_idx < 5'd17) begin
+                end else if (rx_idx > 0 && rx_idx < 5'd18) begin
                     rx_buf[(rx_idx*8)+:8] <= s_rx_data;
                     rx_idx <= rx_idx + 5'd1;
-                    if (rx_idx == 5'd16) begin
+                    if (rx_idx == 5'd17) begin
                         rx_got <= 1'b1;
                         rx_idx <= 5'd0;
                     end
@@ -423,6 +457,7 @@ module top (
     reg [15:0] reg_sv1_pos, reg_sv2_pos;
     reg [3:0] reg_em_state;
     reg [7:0] reg_remote_error;
+    reg [7:0] reg_warn_flags, reg_done_flags;
 
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
@@ -430,8 +465,9 @@ module top (
             reg_m1_pos <= 16'd0; reg_m4_pos <= 16'd0;
             reg_sv1_pos <= 8'd0; reg_sv2_pos <= 8'd0;
             reg_em_state <= 4'd0; reg_remote_error <= 8'd0;
+            reg_warn_flags <= 8'h03; reg_done_flags <= 8'd0;
             reg_status <= 8'd0;
-        end else if (rx_got && crc8_frame16(rx_buf[127:0]) == rx_buf[135:128]) begin
+        end else if (rx_got && crc8_frame17(rx_buf[135:0]) == rx_buf[143:136]) begin
             reg_status  <= {rx_buf[15:9], busy};
             reg_m2_pos  <= {rx_buf[31:24], rx_buf[23:16]};
             reg_m3_pos  <= {rx_buf[47:40], rx_buf[39:32]};
@@ -439,8 +475,10 @@ module top (
             reg_m4_pos  <= {rx_buf[79:72], rx_buf[71:64]};
             reg_sv1_pos <= {rx_buf[95:88],rx_buf[87:80]};
             reg_sv2_pos <= {rx_buf[111:104],rx_buf[103:96]};
-            reg_em_state <= rx_buf[115:112];
+            reg_em_state <= 4'd0;
+            reg_warn_flags <= rx_buf[119:112];
             reg_remote_error <= rx_buf[127:120];
+            reg_done_flags <= rx_buf[135:128];
         end
     end
 
@@ -448,7 +486,7 @@ module top (
     //   EM 硬件激活 或 龙芯写入 cycle_ctrl=1 → BUSY=1
     //   龙芯写入 cycle_ctrl=0 → BUSY=0 (整个分拣周期结束, 可开始下一轮视觉)
     reg cycle_ctrl;  // 0x0F bit0, 龙芯写1=忙 写0=就绪
-    wire busy = (reg_em_state != 4'd0) || cycle_ctrl;
+    wire busy = cycle_ctrl;
 
     //==========================================================================
     // Beep — 诊断: TX完成短鸣20ms / 收到S3帧短鸣

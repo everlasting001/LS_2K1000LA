@@ -63,6 +63,8 @@ static uint16_t gripper_angle = 80;       // 夹爪舵机: 80° 张开
 
 // 在线状态
 static uint32_t last_valid_command = 0;   // 最后有效命令时间
+static uint8_t last_executed_seq = 0;
+static bool have_executed_seq = false;
 
 // 电机轮询控制
 static uint32_t last_motor_poll = 0;
@@ -158,10 +160,17 @@ static void process_receive(
     // 校验魔数、版本、CRC
     if (!packet_valid(p, CMD_MAGIC)) return;
 
+    last_valid_command = millis();
+
+    // FPGA/路由层可能重发同一序列号；只回复状态，不重复驱动电机。
+    if (have_executed_seq && p.seq == last_executed_seq) {
+        status_packet.seq = p.seq;
+        return;
+    }
+
     // 缓存命令 (中断安全)
     memcpy(&pending_command, &p, sizeof(p));
     command_ready      = true;
-    last_valid_command = millis();
 }
 
 // ESP-NOW 接收回调 (兼容 Arduino ESP32 v2 和 v3 API)
@@ -236,6 +245,9 @@ void setup() {
     // 初始化 M2 和 M3 电机 UART (独立串口)
     Serial1.begin(115200, SERIAL_8N1, M2_RX, M2_TX);
     Serial2.begin(115200, SERIAL_8N1, M3_RX, M3_TX);
+    delay(100);
+    Serial.printf("M2 enable: %s\n", emm_enable(Serial1, M2_ADDR, true) ? "OK" : "FAIL");
+    Serial.printf("M3 enable: %s\n", emm_enable(Serial2, M3_ADDR, true) ? "OK" : "FAIL");
 
     // 初始化舵机 PWM
     servo_setup();
@@ -273,6 +285,8 @@ void loop() {
 
         // 记录序列号用于状态回复
         status_packet.seq = c.seq;
+        last_executed_seq = c.seq;
+        have_executed_seq = true;
 
         if (c.cmd == CMD_ESTOP || (c.flags & FLAG_ESTOP)) {
             // 急停
@@ -285,18 +299,26 @@ void loop() {
             // M2 (升降)
             if (c.flags & FLAG_M2_ENABLE) {
                 uint16_t spd = c.speed1 ? c.speed1 : 300;
-                if (!emm_position(Serial1, M2_ADDR, c.value1,
+                if (c.value1 < -192000 || c.value1 > 192000 || spd > 1000) {
+                    status_packet.error |= 0x08;
+                } else if (!emm_position(Serial1, M2_ADDR, c.value1,
                                   spd, relative)) {
                     status_packet.error |= 0x01;
+                } else {
+                    status_packet.error &= ~0x09;
                 }
             }
 
             // M3 (小臂)
             if (c.flags & FLAG_M3_ENABLE) {
                 uint16_t spd = c.speed2 ? c.speed2 : 300;
-                if (!emm_position(Serial2, M3_ADDR, c.value2,
+                if (c.value2 < -10000 || c.value2 > 10000 || spd > 1000) {
+                    status_packet.error |= 0x08;
+                } else if (!emm_position(Serial2, M3_ADDR, c.value2,
                                   spd, relative)) {
                     status_packet.error |= 0x02;
+                } else {
+                    status_packet.error &= ~0x0A;
                 }
             }
         }
@@ -304,12 +326,22 @@ void loop() {
             // 舵机控制: aux1=旋转角度, aux2=夹爪角度
             // 0xFFFF 表示不更新该通道
             if (c.aux1 != 0xFFFF) {
-                rotate_angle = (c.aux1 > 270) ? 270 : c.aux1;
-                servo_write(LEDC_CHANNEL_0, rotate_angle, 270);
+                if (c.aux1 > 270) {
+                    status_packet.error |= 0x08;
+                } else {
+                    rotate_angle = c.aux1;
+                    servo_write(LEDC_CHANNEL_0, rotate_angle, 270);
+                    status_packet.error &= ~0x08;
+                }
             }
             if (c.aux2 != 0xFFFF) {
-                gripper_angle = (c.aux2 > 180) ? 180 : c.aux2;
-                servo_write(LEDC_CHANNEL_1, gripper_angle, 180);
+                if (c.aux2 > 180) {
+                    status_packet.error |= 0x08;
+                } else {
+                    gripper_angle = c.aux2;
+                    servo_write(LEDC_CHANNEL_1, gripper_angle, 180);
+                    status_packet.error &= ~0x08;
+                }
             }
         }
     }

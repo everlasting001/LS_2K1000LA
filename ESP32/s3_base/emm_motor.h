@@ -74,6 +74,14 @@ inline size_t emm_exchange(
 
 // -------- 电机控制命令 --------
 
+inline bool emm_enable(HardwareSerial &port, uint8_t addr, bool enable) {
+    uint8_t f[13] = {addr,0x10,0x00,0xF3,0x00,0x02,0x04,
+                     0xAB,(uint8_t)(enable?1:0),0x00,0x00,0,0};
+    append_modbus_crc(f,11);
+    uint8_t r[16];
+    return emm_exchange(port,f,sizeof(f),r,sizeof(r),100)>=8;
+}
+
 // 位置模式: 以指定速度运动到目标脉冲数
 //   addr:   MODBUS 从机地址 (出厂默认 1)
 //   pulses: 目标脉冲数 (正=正向, 负=反向, 3200 脉冲/圈)

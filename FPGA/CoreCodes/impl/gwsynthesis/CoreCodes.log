@@ -1,22 +1,17 @@
 GowinSynthesis start
 Running parser ...
-Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_tx.v'
-Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_rx.v'
-Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\crc16.v'
-Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\i2c_slave.v'
-Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v'
-Undeclared symbol 'tx_start', assumed default net type 'wire'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":56)
-Undeclared symbol 'tx_byte', assumed default net type 'wire'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":56)
-Undeclared symbol 'dbg_start', assumed default net type 'wire'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":62)
-Undeclared symbol 'dbg_byte', assumed default net type 'wire'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":62)
-WARN  (EX3638) : 'tx_start' is already implicitly declared on line 56("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":152)
-WARN  (EX3638) : 'tx_byte' is already implicitly declared on line 56("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":152)
-WARN  (EX3638) : 'dbg_start' is already implicitly declared on line 62("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":408)
-WARN  (EX3638) : 'dbg_byte' is already implicitly declared on line 62("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":408)
-Compiling module 'top'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\top.v":20)
-Compiling module 'i2c_slave'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\i2c_slave.v":18)
-Compiling module 'uart_rx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_rx.v":19)
-Compiling module 'uart_tx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\src\uart_tx.v":16)
+Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_tx.v'
+Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_rx.v'
+Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\crc16.v'
+Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\i2c_slave.v'
+Analyzing Verilog file 'E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v'
+Compiling module 'top'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":23)
+Compiling module 'i2c_slave'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\i2c_slave.v":18)
+Compiling module 'uart_rx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_rx.v":19)
+Compiling module 'uart_tx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_tx.v":16)
+WARN  (EX3791) : Expression size 16 truncated to fit in target size 8("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":176)
+WARN  (EX3791) : Expression size 16 truncated to fit in target size 8("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":177)
+WARN  (EX3791) : Expression size 144 truncated to fit in target size 96("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":517)
 NOTE  (EX0101) : Current top module is "top"
 [5%] Running netlist conversion ...
 Running device independent optimization ...
@@ -34,6 +29,6 @@ Running technical mapping ...
 [75%] Tech-Mapping Phase 2 completed
 [80%] Tech-Mapping Phase 3 completed
 [90%] Tech-Mapping Phase 4 completed
-[95%] Generate netlist file "E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg" completed
-[100%] Generate report file "E:\GOWIN_Project\FourAxisRobotsWithFPGA\CoreCodes\impl\gwsynthesis\CoreCodes_syn.rpt.html" completed
+[95%] Generate netlist file "E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\impl\gwsynthesis\CoreCodes.vg" completed
+[100%] Generate report file "E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\impl\gwsynthesis\CoreCodes_syn.rpt.html" completed
 GowinSynthesis finish
