@@ -12,7 +12,7 @@ import fcntl
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
-    QApplication, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
     QSlider, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
 )
@@ -52,8 +52,9 @@ SERVO_HOME_DEG = 127.0
 def forward_kinematics(m1_deg, m3_deg, servo_deg):
     """按实物正方向计算三关节平面坐标，返回三个关节点和末端姿态。"""
     a1 = math.radians(-m1_deg)  # M1顺时针为正，数学角度取负
-    # M3在复位点向大臂顺时针内折28.5°，之后角度增加对应逆时针运动。
-    a2 = a1 + math.radians((m3_deg - M3_HOME_DEG) - M3_HOME_DEG)
+    # M3复位时相对大臂的反方向(-X局部轴)向-Y侧夹28.5°，即向后内折。
+    # 之后M3显示角增加，对应小臂逆时针运动。
+    a2 = a1 + math.radians(180.0 + M3_HOME_DEG + (m3_deg - M3_HOME_DEG))
     # 舵机127°时与小臂平行，舵机角增加对应顺时针运动。
     a3 = a2 - math.radians(servo_deg - SERVO_HOME_DEG)
     p0 = (0.0, 0.0)
@@ -62,6 +63,17 @@ def forward_kinematics(m1_deg, m3_deg, servo_deg):
     p3 = (p2[0] + ARM_L3_CM * math.cos(a3), p2[1] + ARM_L3_CM * math.sin(a3))
     pose_deg = ((math.degrees(a3) + 180.0) % 360.0) - 180.0
     return (p0, p1, p2, p3), pose_deg
+
+
+def servo_for_negative_x(m1_deg, m3_deg, current_servo=127.0):
+    """反解使夹爪全局朝向-X（180°）的舵机角，返回0..270内最近解。"""
+    small_arm_deg = -m1_deg + 180.0 + m3_deg
+    raw = SERVO_HOME_DEG + small_arm_deg - 180.0
+    candidates = [raw - 360.0 * turn for turn in range(-2, 4)
+                  if 0.0 <= raw - 360.0 * turn <= 270.0]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda value: abs(value - current_servo))
 
 
 class ArmCanvas(QWidget):
@@ -440,6 +452,11 @@ class RemoteWindow(QMainWindow):
         pose_layout.addWidget(QLabel("末端姿态"), 3, 0); pose_layout.addWidget(self.fk_pose, 3, 1)
         pose_layout.addWidget(QLabel("连杆"), 4, 0)
         pose_layout.addWidget(QLabel("275 + 160 + 95 mm"), 4, 1)
+        self.keep_negative_x = QCheckBox("夹爪保持 −X 方向")
+        self.keep_negative_x.setChecked(True)
+        self.required_servo = QLabel("解算舵机：--")
+        pose_layout.addWidget(self.keep_negative_x, 5, 0, 1, 2)
+        pose_layout.addWidget(self.required_servo, 6, 0, 1, 2)
         view_row.addWidget(pose_box, 1)
         layout.addLayout(view_row, 1)
         return page
@@ -572,8 +589,33 @@ class RemoteWindow(QMainWindow):
         target = self.axis_steps[axis].value()
         current = self.backend.positions[axis]
         delta = target - current
+        if axis in ("M1", "M3") and self.keep_negative_x.isChecked():
+            target_m1 = target if axis == "M1" else self.backend.positions["M1"]
+            target_m3 = target if axis == "M3" else self.backend.positions["M3"]
+            servo = servo_for_negative_x(target_m1, target_m3,
+                                          self.backend.servo_rotate)
+            if servo is None:
+                self.append_log("拒绝：该关节目标无法在舵机0～270°范围内保持夹爪朝向−X")
+                QMessageBox.warning(self, "姿态不可达", "旋转舵机无合法角度，关节指令未发送")
+                return
+            servo_command = int(round(servo))
+            try:
+                self.backend.set_servos(servo_command, self.backend.servo_grip)
+                for line in self.backend.take_write_trace():
+                    self.append_log(line)
+                self.rotate.setValue(servo_command)
+                self.required_servo.setText("解算舵机：%d°（目标姿态 180°）" % servo_command)
+                self.append_log("末端−X姿态补偿：旋转舵机 → %d°" % servo_command)
+            except Exception as error:
+                self.append_log("舵机姿态补偿失败：%s" % error)
+                QMessageBox.warning(self, "控制失败", str(error))
+                return
         if abs(delta) < 0.0001:
-            self.append_log("%s 已在目标位置 %.1f，无需运动" % (axis, target))
+            if axis in ("M1", "M3") and self.keep_negative_x.isChecked():
+                self.append_log("%s 已在目标位置 %.1f，已仅执行末端姿态补偿" % (axis, target))
+            else:
+                self.append_log("%s 已在目标位置 %.1f，无需运动" % (axis, target))
+            self.refresh_positions()
             return
         self.move_axis(axis, delta)
 
@@ -623,6 +665,13 @@ class RemoteWindow(QMainWindow):
         self.fk_y.setText("%.2f cm" % end[1])
         self.fk_z.setText("%.2f cm" % (self.backend.positions["M2"] / 10.0))
         self.fk_pose.setText("%.1f°" % pose_deg)
+        required = servo_for_negative_x(self.backend.positions["M1"],
+                                        self.backend.positions["M3"],
+                                        self.backend.servo_rotate)
+        if required is None:
+            self.required_servo.setText("解算舵机：当前关节姿态不可达")
+        else:
+            self.required_servo.setText("解算舵机：%.1f°（−X）" % required)
         self.arm_canvas.set_pose(self.backend.positions["M1"],
                                  self.backend.positions["M3"],
                                  self.backend.servo_rotate)
