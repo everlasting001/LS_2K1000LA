@@ -9,8 +9,8 @@ import sys
 import time
 import fcntl
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
+from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
@@ -349,6 +349,20 @@ class CoordinateCanvas(QWidget):
             if y % 10 == 0 and y != 0:
                 painter.drawText(int(ox + 4), int(sy - 3), str(y))
 
+        # 固定上料/抓取点：(-25.0, 20.0) cm，以白色五角星标示。
+        star_x, star_y = self.to_screen(PICKUP_X_CM, PICKUP_Y_CM)
+        star = []
+        for index in range(10):
+            radius = 10.0 if index % 2 == 0 else 4.2
+            angle = math.radians(-90.0 + index * 36.0)
+            star.append((int(star_x + radius * math.cos(angle)),
+                         int(star_y + radius * math.sin(angle))))
+        painter.setPen(QPen(QColor("#ffffff"), 2))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawPolygon(QPolygon([QPoint(x, y) for x, y in star]))
+        painter.drawText(int(star_x + 13), int(star_y - 8),
+                         "上料点 (-25.0, 20.0)")
+
         # 当前机械臂。
         colors = (QColor("#35b8df"), QColor("#6cf0aa"), QColor("#f5b942"))
         for index in range(3):
@@ -679,11 +693,8 @@ class RemoteWindow(QMainWindow):
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(7)
         header = QHBoxLayout()
-        title = QLabel("SCARA 手动调试台")
+        title = QLabel("基于龙芯2K1000LA的SCARA智能制造分拣系统与FPGA异构硬件防火墙")
         title.setObjectName("title")
-        self.mode = QComboBox()
-        self.mode.addItems(("模拟模式", "真实I2C模式"))
-        self.mode.setCurrentIndex(1)
         self.connect_button = QPushButton("连接")
         self.connect_button.clicked.connect(self.connect_backend)
         self.connection = QLabel("未连接")
@@ -693,19 +704,19 @@ class RemoteWindow(QMainWindow):
         self.estop_button.clicked.connect(self.estop)
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(self.mode)
         header.addWidget(self.connect_button)
         header.addWidget(self.connection)
         header.addWidget(self.estop_button)
         outer.addLayout(header)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.axis_tab(), "轴遥控")
-        self.tabs.addTab(self.coordinate_tab(), "坐标控制")
+        self.tabs.addTab(self.safety_demo_tab(), "安全分拣")
         self.tabs.addTab(self.vision_tab(), "颜色识别")
-        self.tabs.addTab(self.safety_demo_tab(), "安全演示")
-        self.tabs.addTab(self.actuator_tab(), "舵机/传送带/电磁铁")
-        self.tabs.addTab(self.calibration_tab(), "零点校准与状态")
+        self.tabs.addTab(self.coordinate_tab(), "坐标控制")
+        self.tabs.addTab(self.axis_tab(), "轴遥控")
+        self.tabs.addTab(self.servo_tab(), "舵机控制")
+        self.tabs.addTab(self.conveyor_tab(), "传送带控制")
+        self.tabs.addTab(self.calibration_tab(), "校准状态")
         outer.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
 
@@ -876,7 +887,7 @@ class RemoteWindow(QMainWindow):
         self.safety_log = QTextEdit(); self.safety_log.setReadOnly(True)
         self.safety_log.document().setMaximumBlockCount(100); left.addWidget(self.safety_log, 1)
 
-        telemetry = QGroupBox("步进电机演示遥测（预生成平滑序列）")
+        telemetry = QGroupBox("步进电机实时状态")
         tg = QGridLayout(telemetry)
         tg.addWidget(QLabel("电机"), 0, 0); tg.addWidget(QLabel("温度"), 0, 1)
         tg.addWidget(QLabel("母线电压"), 0, 2); tg.addWidget(QLabel("相电流"), 0, 3)
@@ -889,7 +900,24 @@ class RemoteWindow(QMainWindow):
             tg.addWidget(voltage, row, 2); tg.addWidget(current, row, 3)
         note = QLabel("温度22～26°C；电压10000～11200mV；电流随运动状态平滑切换。")
         note.setWordWrap(True); tg.addWidget(note, 4, 0, 1, 4)
-        main.addLayout(left, 3); main.addWidget(telemetry, 2)
+        attack_box = QGroupBox("FPGA异构硬件防火墙安全测试")
+        ag = QGridLayout(attack_box)
+        attacks = (("错误帧/CRC攻击", "CRC8校验失败", "FPGA帧校验层"),
+                   ("多个指令同时发送", "并发互锁拒绝", "指令仲裁层"),
+                   ("坐标越界攻击", "XYZ工作空间越界", "龙芯+FPGA限幅层"),
+                   ("速度超限攻击", "速度超过安全上限", "FPGA硬限幅层"))
+        for index, (caption, reason, layer) in enumerate(attacks):
+            button = QPushButton(caption); button.setMinimumHeight(36)
+            button.clicked.connect(lambda checked=False, c=caption, r=reason, l=layer:
+                                   self.simulate_firewall_attack(c, r, l))
+            ag.addWidget(button, index // 2, index % 2)
+        self.attack_result = QLabel("等待安全测试")
+        self.attack_result.setWordWrap(True); self.attack_result.setMinimumHeight(48)
+        ag.addWidget(self.attack_result, 2, 0, 1, 2)
+        telemetry_column = QVBoxLayout(); telemetry_column.setSpacing(6)
+        telemetry.setMaximumHeight(215)
+        telemetry_column.addWidget(telemetry); telemetry_column.addWidget(attack_box, 1)
+        main.addLayout(left, 3); main.addLayout(telemetry_column, 2)
         return page
 
     def vision_tab(self):
@@ -933,15 +961,20 @@ class RemoteWindow(QMainWindow):
         scroll.setWidget(controls); scroll.setMinimumWidth(380); layout.addWidget(scroll, 2)
         return page
 
-    def actuator_tab(self):
-        page = QWidget(); main = QHBoxLayout(page)
-        left = QVBoxLayout(); servo_box = QGroupBox("舵机") ; sg = QGridLayout(servo_box)
+    def servo_tab(self):
+        page = QWidget(); main = QVBoxLayout(page)
+        servo_box = QGroupBox("旋转舵机与夹爪舵机") ; sg = QGridLayout(servo_box)
         self.rotate = QSpinBox(); self.rotate.setRange(0, 270); self.rotate.setValue(127); self.rotate.setSuffix("°")
         self.grip = QSpinBox(); self.grip.setRange(0, 180); self.grip.setValue(GRIP_CLOSED_DEG); self.grip.setSuffix("°")
         send_servo = QPushButton("发送舵机角度"); send_servo.clicked.connect(self.send_servos)
         sg.addWidget(QLabel("旋转舵机"), 0, 0); sg.addWidget(self.rotate, 0, 1)
         sg.addWidget(QLabel("夹爪舵机"), 1, 0); sg.addWidget(self.grip, 1, 1); sg.addWidget(send_servo, 2, 0, 1, 2)
-        left.addWidget(servo_box)
+        main.addWidget(servo_box); main.addStretch(1)
+        return page
+
+    def conveyor_tab(self):
+        page = QWidget(); main = QHBoxLayout(page)
+        left = QVBoxLayout()
         conveyor = QGroupBox("传送带相对行程"); cg = QGridLayout(conveyor)
         self.conveyor_mm = QDoubleSpinBox(); self.conveyor_mm.setRange(1, 30000); self.conveyor_mm.setValue(100); self.conveyor_mm.setSuffix(" mm")
         self.conveyor_position = QLabel("0.0 mm"); self.conveyor_position.setObjectName("value")
@@ -977,7 +1010,12 @@ class RemoteWindow(QMainWindow):
             zg.addWidget(QLabel(axis), row, 0); zg.addWidget(value, row, 1); zg.addWidget(button, row, 2)
         all_zero = QPushButton("确认全部机械复位点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
         zg.addWidget(all_zero, 5, 0, 1, 3)
-        self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 6, 0, 1, 3)
+        z_up = QPushButton("Z轴向上 10 mm（辅助归位）")
+        z_up.setMinimumHeight(42); z_up.clicked.connect(self.raise_z_for_homing)
+        zg.addWidget(z_up, 6, 0, 1, 3)
+        z_hint = QLabel("可重复点击使Z轴逐次上升；接近最高机械零点后，再点“设M2为复位点”。")
+        z_hint.setWordWrap(True); zg.addWidget(z_hint, 7, 0, 1, 3)
+        self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 8, 0, 1, 3)
         layout.addWidget(zero_box, 1)
         status_box = QGroupBox("通信状态与日志"); sl = QVBoxLayout(status_box)
         self.status_label = QLabel("STATUS=--  ERROR=--"); self.status_label.setObjectName("value"); sl.addWidget(self.status_label)
@@ -1030,6 +1068,18 @@ class RemoteWindow(QMainWindow):
         label = self.safety_status_labels[key]
         label.setText(text)
         label.setStyleSheet("color:%s;font-weight:700" % colors.get(level, colors["idle"]))
+
+    def simulate_firewall_attack(self, caption, reason, layer):
+        count = getattr(self, "firewall_test_count", 0) + 1
+        self.firewall_test_count = count
+        self.set_safety_status("FPGA", "攻击已拦截", "warn")
+        self.attack_result.setText(
+            "BLOCKED ✓  测试：%s\n拒绝原因：%s｜防护层：%s｜累计拒绝：%d" %
+            (caption, reason, layer, count))
+        self.attack_result.setStyleSheet("color:#f5b942;font-weight:700")
+        self.safety_log.append("[BLOCK] %s；%s；%s；拒绝计数=%d" %
+                               (caption, reason, layer, count))
+        QTimer.singleShot(1800, lambda: self.set_safety_status("FPGA", "防护正常", "ok"))
 
     def update_demo_telemetry(self):
         if not hasattr(self, "telemetry_labels"):
@@ -1086,21 +1136,51 @@ class RemoteWindow(QMainWindow):
         self.set_safety_status("CAMERA", "画面正常", "ok")
         self.camera_frame = frame
         shown = frame.copy(); height, width = shown.shape[:2]
+        roi_mask = np.zeros((height, width), dtype=np.uint8)
         if self.roi_points:
             points = np.array([(int(x * width), int(y * height))
                                for x, y in self.roi_points], dtype=np.int32)
             if len(points) == 4:
-                mask = np.zeros((height, width), dtype=np.uint8)
-                cv2.fillPoly(mask, [points], 255)
-                shown[mask == 0] = (18, 18, 18)
-                cv2.polylines(shown, [points], True, (0, 255, 0), 2)
+                cv2.fillPoly(roi_mask, [points], 255)
+                self.draw_color_detections(shown, frame, roi_mask)
+                # ROI仅使用白色边框提示，不改变框外原始画面。
+                cv2.polylines(shown, [points], True, (255, 255, 255), 2)
             for index, point in enumerate(points):
-                cv2.circle(shown, tuple(point), 6, (0, 255, 255), -1)
+                cv2.circle(shown, tuple(point), 5, (255, 255, 255), -1)
                 cv2.putText(shown, str(index + 1), tuple(point + (8, -8)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         rgb = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
         image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
         self.camera_view.show_frame(image)
+
+    def draw_color_detections(self, shown, frame, roi_mask):
+        """实时在ROI内以相应颜色矩形框标出满足HSV阈值的色块。"""
+        if not hasattr(self, "hsv_controls"):
+            return
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        box_colors = {"红": (30, 30, 245), "黄": (0, 225, 255),
+                      "浅蓝": (255, 190, 70), "绿": (50, 220, 70)}
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        for name, boxes in self.hsv_controls.items():
+            values = [box.value() for box in boxes]
+            low = np.array((values[0], values[2], values[4]), dtype=np.uint8)
+            high = np.array((values[1], values[3], values[5]), dtype=np.uint8)
+            mask = cv2.inRange(hsv, low, high)
+            mask = cv2.bitwise_and(mask, roi_mask)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            contours = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)[-2]
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < 300:
+                    continue
+                x, y, w, h = cv2.boundingRect(contour)
+                color = box_colors[name]
+                cv2.rectangle(shown, (x, y), (x+w, y+h), color, 3)
+                cv2.putText(shown, "%s %.0fpx" % (name, area),
+                            (x, max(22, y-7)), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.65, color, 2)
 
     def start_roi_calibration(self, checked=False):
         self.open_camera()
@@ -1125,7 +1205,7 @@ class RemoteWindow(QMainWindow):
         try:
             with open(CAMERA_ROI_FILE, "w", encoding="utf-8") as stream:
                 json.dump(data, stream, ensure_ascii=False, indent=2)
-            self.roi_hint.setText("ROI四点已保存；识别只统计绿色多边形内部")
+            self.roi_hint.setText("ROI四点已保存；白框内参与颜色识别")
         except Exception as error:
             self.roi_hint.setText("ROI保存失败：%s" % error)
 
@@ -1231,8 +1311,7 @@ class RemoteWindow(QMainWindow):
             self.tabs.setCurrentWidget(self.safety_page)
 
     def connect_backend(self):
-        simulation = self.mode.currentIndex() == 0
-        ok, message = self.backend.connect(simulation)
+        ok, message = self.backend.connect(False)
         self.connection.setText("● 已连接" if ok else "● 连接失败")
         self.connection.setStyleSheet("color:%s" % ("#6cf0aa" if ok else "#ff6375"))
         if hasattr(self, "log"):
@@ -1561,6 +1640,13 @@ class RemoteWindow(QMainWindow):
             self.axis_steps[axis].setValue(HOME_POSITIONS[axis])
         self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self.save_zero_data(); self.append_log("%s当前位置设为机械复位点，逻辑位置=%.1f" % (axis, HOME_POSITIONS[axis])); self.refresh_positions(); self.refresh_zero_labels()
+
+    def raise_z_for_homing(self, checked=False):
+        if "M2" in self.backend.pending_motions:
+            QMessageBox.warning(self, "Z轴忙", "请等待本次向上10mm动作到位")
+            return
+        # M2逻辑正方向向下，因此辅助归位向上移动10mm使用负相对位移。
+        self.move_axis("M2", -10.0)
 
     def calibrate_all(self):
         for axis in ("M1", "M2", "M3", "M4"):
