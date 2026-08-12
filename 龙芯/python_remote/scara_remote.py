@@ -13,7 +13,7 @@ from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygon
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea,
     QSlider, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
 )
 
@@ -898,22 +898,46 @@ class RemoteWindow(QMainWindow):
             self.telemetry_labels[axis] = (temp, voltage, current)
             tg.addWidget(QLabel(axis), row, 0); tg.addWidget(temp, row, 1)
             tg.addWidget(voltage, row, 2); tg.addWidget(current, row, 3)
-        note = QLabel("温度22～26°C；电压10000～11200mV；电流随运动状态平滑切换。")
-        note.setWordWrap(True); tg.addWidget(note, 4, 0, 1, 4)
         attack_box = QGroupBox("FPGA异构硬件防火墙安全测试")
-        ag = QGridLayout(attack_box)
-        attacks = (("错误帧/CRC攻击", "CRC8校验失败", "FPGA帧校验层"),
-                   ("多个指令同时发送", "并发互锁拒绝", "指令仲裁层"),
-                   ("坐标越界攻击", "XYZ工作空间越界", "龙芯+FPGA限幅层"),
-                   ("速度超限攻击", "速度超过安全上限", "FPGA硬限幅层"))
-        for index, (caption, reason, layer) in enumerate(attacks):
-            button = QPushButton(caption); button.setMinimumHeight(36)
-            button.clicked.connect(lambda checked=False, c=caption, r=reason, l=layer:
-                                   self.simulate_firewall_attack(c, r, l))
-            ag.addWidget(button, index // 2, index % 2)
+        ag = QVBoxLayout(attack_box); tests = QTabWidget()
+
+        frame_page = QWidget(); frame_grid = QGridLayout(frame_page)
+        self.test_frame = QLineEdit("AA 20 40 01 00 00 00 00 00 00 19 00 00")
+        frame_button = QPushButton("验证指令帧"); frame_button.clicked.connect(self.test_firewall_frame)
+        frame_grid.addWidget(QLabel("HEX帧"), 0, 0); frame_grid.addWidget(self.test_frame, 0, 1)
+        frame_grid.addWidget(frame_button, 1, 0, 1, 2); tests.addTab(frame_page, "指令帧")
+
+        concurrent_page = QWidget(); concurrent_grid = QGridLayout(concurrent_page)
+        self.test_command_count = QSpinBox(); self.test_command_count.setRange(1, 20); self.test_command_count.setValue(1)
+        self.test_command_gap = QSpinBox(); self.test_command_gap.setRange(0, 2000); self.test_command_gap.setValue(100); self.test_command_gap.setSuffix(" ms")
+        concurrent_button = QPushButton("验证并发指令"); concurrent_button.clicked.connect(self.test_firewall_concurrency)
+        concurrent_grid.addWidget(QLabel("指令数量"), 0, 0); concurrent_grid.addWidget(self.test_command_count, 0, 1)
+        concurrent_grid.addWidget(QLabel("发送间隔"), 1, 0); concurrent_grid.addWidget(self.test_command_gap, 1, 1)
+        concurrent_grid.addWidget(concurrent_button, 2, 0, 1, 2); tests.addTab(concurrent_page, "并发指令")
+
+        coordinate_page = QWidget(); coordinate_grid = QGridLayout(coordinate_page)
+        self.test_x = QDoubleSpinBox(); self.test_x.setRange(-100, 100); self.test_x.setValue(-25); self.test_x.setSuffix(" cm")
+        self.test_y = QDoubleSpinBox(); self.test_y.setRange(-100, 100); self.test_y.setValue(20); self.test_y.setSuffix(" cm")
+        self.test_z = QDoubleSpinBox(); self.test_z.setRange(-100, 300); self.test_z.setValue(140); self.test_z.setSuffix(" mm")
+        coordinate_button = QPushButton("验证XYZ坐标"); coordinate_button.clicked.connect(self.test_firewall_coordinate)
+        for column, (name, box) in enumerate((("X", self.test_x), ("Y", self.test_y), ("Z", self.test_z))):
+            coordinate_grid.addWidget(QLabel(name), 0, column); coordinate_grid.addWidget(box, 1, column)
+        coordinate_grid.addWidget(coordinate_button, 2, 0, 1, 3); tests.addTab(coordinate_page, "坐标限幅")
+
+        speed_page = QWidget(); speed_grid = QGridLayout(speed_page)
+        self.test_speed_axis = QComboBox(); self.test_speed_axis.addItems(("M1 大臂", "M2 升降", "M3 小臂"))
+        self.test_speed = QSpinBox(); self.test_speed.setRange(1, 4000); self.test_speed.setValue(25); self.test_speed.setSuffix(" RPM")
+        self.test_speed_distance = QDoubleSpinBox(); self.test_speed_distance.setRange(-20, 20)
+        self.test_speed_distance.setValue(2.0); self.test_speed_distance.setSuffix(" °/mm")
+        speed_button = QPushButton("验证速度"); speed_button.clicked.connect(self.test_firewall_speed)
+        speed_grid.addWidget(QLabel("目标轴"), 0, 0); speed_grid.addWidget(self.test_speed_axis, 0, 1)
+        speed_grid.addWidget(QLabel("速度"), 1, 0); speed_grid.addWidget(self.test_speed, 1, 1)
+        speed_grid.addWidget(QLabel("测试位移"), 2, 0); speed_grid.addWidget(self.test_speed_distance, 2, 1)
+        speed_grid.addWidget(speed_button, 3, 0, 1, 2); tests.addTab(speed_page, "速度限幅")
+        ag.addWidget(tests)
         self.attack_result = QLabel("等待安全测试")
         self.attack_result.setWordWrap(True); self.attack_result.setMinimumHeight(48)
-        ag.addWidget(self.attack_result, 2, 0, 1, 2)
+        ag.addWidget(self.attack_result)
         telemetry_column = QVBoxLayout(); telemetry_column.setSpacing(6)
         telemetry.setMaximumHeight(215)
         telemetry_column.addWidget(telemetry); telemetry_column.addWidget(attack_box, 1)
@@ -966,9 +990,23 @@ class RemoteWindow(QMainWindow):
         servo_box = QGroupBox("旋转舵机与夹爪舵机") ; sg = QGridLayout(servo_box)
         self.rotate = QSpinBox(); self.rotate.setRange(0, 270); self.rotate.setValue(127); self.rotate.setSuffix("°")
         self.grip = QSpinBox(); self.grip.setRange(0, 180); self.grip.setValue(GRIP_CLOSED_DEG); self.grip.setSuffix("°")
-        send_servo = QPushButton("发送舵机角度"); send_servo.clicked.connect(self.send_servos)
-        sg.addWidget(QLabel("旋转舵机"), 0, 0); sg.addWidget(self.rotate, 0, 1)
-        sg.addWidget(QLabel("夹爪舵机"), 1, 0); sg.addWidget(self.grip, 1, 1); sg.addWidget(send_servo, 2, 0, 1, 2)
+        self.rotate_slider = QSlider(Qt.Horizontal); self.rotate_slider.setRange(0, 270); self.rotate_slider.setValue(127)
+        self.grip_slider = QSlider(Qt.Horizontal); self.grip_slider.setRange(0, 180); self.grip_slider.setValue(GRIP_CLOSED_DEG)
+        for slider in (self.rotate_slider, self.grip_slider):
+            slider.setMinimumWidth(500); slider.setMinimumHeight(46); slider.setSingleStep(1); slider.setPageStep(5)
+        self.rotate_slider.valueChanged.connect(self.rotate.setValue)
+        self.rotate.valueChanged.connect(self.rotate_slider.setValue)
+        self.grip_slider.valueChanged.connect(self.grip.setValue)
+        self.grip.valueChanged.connect(self.grip_slider.setValue)
+        rotate_ok = QPushButton("OK"); rotate_ok.setObjectName("axisOk"); rotate_ok.setMinimumSize(72, 44)
+        grip_ok = QPushButton("OK"); grip_ok.setObjectName("axisOk"); grip_ok.setMinimumSize(72, 44)
+        rotate_ok.clicked.connect(self.send_rotate_servo); grip_ok.clicked.connect(self.send_grip_servo)
+        sg.addWidget(QLabel("旋转舵机"), 0, 0); sg.addWidget(self.rotate_slider, 0, 1)
+        sg.addWidget(self.rotate, 0, 2); sg.addWidget(rotate_ok, 0, 3)
+        sg.addWidget(QLabel("夹爪舵机"), 1, 0); sg.addWidget(self.grip_slider, 1, 1)
+        sg.addWidget(self.grip, 1, 2); sg.addWidget(grip_ok, 1, 3)
+        hint = QLabel("滑动条与数值显示当前/目标角度；调整后点击对应OK才发送。夹爪：30°张开，105°闭合。")
+        hint.setWordWrap(True); hint.setObjectName("hint"); sg.addWidget(hint, 2, 0, 1, 4)
         main.addWidget(servo_box); main.addStretch(1)
         return page
 
@@ -1069,17 +1107,119 @@ class RemoteWindow(QMainWindow):
         label.setText(text)
         label.setStyleSheet("color:%s;font-weight:700" % colors.get(level, colors["idle"]))
 
-    def simulate_firewall_attack(self, caption, reason, layer):
-        count = getattr(self, "firewall_test_count", 0) + 1
-        self.firewall_test_count = count
-        self.set_safety_status("FPGA", "攻击已拦截", "warn")
-        self.attack_result.setText(
-            "BLOCKED ✓  测试：%s\n拒绝原因：%s｜防护层：%s｜累计拒绝：%d" %
-            (caption, reason, layer, count))
-        self.attack_result.setStyleSheet("color:#f5b942;font-weight:700")
-        self.safety_log.append("[BLOCK] %s；%s；%s；拒绝计数=%d" %
-                               (caption, reason, layer, count))
-        QTimer.singleShot(1800, lambda: self.set_safety_status("FPGA", "防护正常", "ok"))
+    def show_firewall_test(self, accepted, test, detail, layer):
+        if accepted:
+            text, color = "ACCEPT ✓", "#6cf0aa"
+            self.set_safety_status("FPGA", "验证通过", "ok")
+            log_type = "PASS"
+        else:
+            self.firewall_test_count = getattr(self, "firewall_test_count", 0) + 1
+            text, color = "BLOCKED ✓", "#f5b942"
+            self.set_safety_status("FPGA", "异常已拦截", "warn")
+            log_type = "BLOCK"
+        count = getattr(self, "firewall_test_count", 0)
+        self.attack_result.setText("%s  %s\n%s｜校验层：%s｜累计拒绝：%d" %
+                                   (text, test, detail, layer, count))
+        self.attack_result.setStyleSheet("color:%s;font-weight:700" % color)
+        self.safety_log.append("[%s] %s；%s；%s；拒绝计数=%d" %
+                               (log_type, test, detail, layer, count))
+
+    def test_firewall_frame(self, checked=False):
+        try:
+            values = [int(part, 16) for part in self.test_frame.text().split()]
+        except ValueError:
+            self.show_firewall_test(False, "指令帧", "存在非十六进制字节", "输入格式层")
+            return
+        if len(values) != 13 or any(not 0 <= value <= 255 for value in values):
+            self.show_firewall_test(False, "指令帧", "帧长度必须为13字节", "FPGA帧长校验层")
+            return
+        crc = 0
+        for value in values[:-1]:
+            crc ^= value
+            for _ in range(8): crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+        accepted = values[0] == 0xAA and values[-1] == crc
+        detail = ("帧头与CRC8正确，允许进入仲裁" if accepted else
+                  "帧头/CRC错误：收到%02X，计算%02X" % (values[-1], crc))
+        self.show_firewall_test(accepted, "指令帧", detail, "FPGA CRC8/CCITT校验层")
+        if accepted:
+            flags = values[1]
+            value1 = int.from_bytes(bytes(values[2:6]), "little", signed=True)
+            value2 = int.from_bytes(bytes(values[6:10]), "little", signed=True)
+            speed = values[10] | (values[11] << 8)
+            # 仅开放可再次经过龙芯安全限幅的标准轴帧，不允许任意原始帧绕过控制层。
+            requests = []
+            if flags & 0x20: requests.append(("M1", value1 / PULSE_PER_DEG, min(speed, M1_SPEED_LIMIT_RPM)))
+            if flags & 0x02: requests.append(("M2", -value1 / PULSE_PER_LIFT_MM, speed))
+            if flags & 0x04: requests.append(("M3", -value2 / PULSE_PER_DEG, speed))
+            if len(requests) != 1:
+                self.show_firewall_test(False, "指令帧", "安全测试仅允许单轴标准运动帧", "二次语义校验层")
+                return
+            axis, amount, command_speed = requests[0]
+            target = self.backend.positions[axis] + amount
+            limits = {"M1": (0, 350), "M2": (0, 150), "M3": (28.5, 300)}
+            speed_limit = 25 if axis == "M1" else 1000
+            if not limits[axis][0] <= target <= limits[axis][1] or not 1 <= command_speed <= speed_limit:
+                self.show_firewall_test(False, "指令帧", "解析后目标或速度越过安全限幅", "二次语义校验层")
+                return
+            self.move_axis_at_speed(axis, amount, command_speed, "合法帧已下发")
+
+    def test_firewall_concurrency(self, checked=False):
+        count, gap = self.test_command_count.value(), self.test_command_gap.value()
+        accepted = count == 1 or gap >= 80
+        detail = ("%d条指令、间隔%dms，顺序入队" if accepted else
+                  "%d条指令、间隔%dms，检测到并发冲突") % (count, gap)
+        self.show_firewall_test(accepted, "并发指令", detail, "命令仲裁与动作互锁层")
+        if accepted:
+            queue = []
+            for index in range(count):
+                target = 1.0 if index % 2 == 0 else 0.0
+                queue.append(("M2", target, min(100, self.speed.value())))
+            self.start_coordinate_sequence(queue, "并发测试已转为安全顺序队列，共%d条" % count)
+
+    def test_firewall_coordinate(self, checked=False):
+        x, y, z = self.test_x.value(), self.test_y.value(), self.test_z.value()
+        planar = inverse_kinematics_flexible(x, y)
+        accepted = 0.0 <= z <= 150.0 and bool(planar)
+        if accepted:
+            detail = "XYZ=(%.1f,%.1f,%.1f)，逆解合法" % (x, y, z)
+        elif not 0.0 <= z <= 150.0:
+            detail = "Z=%.1fmm超出0～150mm" % z
+        else:
+            detail = "XY=(%.1f,%.1f)不可达或位于机械禁入区" % (x, y)
+        self.show_firewall_test(accepted, "坐标限幅", detail, "工作空间与关节限幅层")
+        if accepted:
+            solution = planar[0]
+            self.start_coordinate_sequence([
+                ("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
+                ("M3", solution["M3"], min(100, self.speed.value())),
+                ("SERVO", solution["SERVO"], 0),
+                ("M2", z, min(100, self.speed.value())),
+            ], "合法XYZ已放行并执行")
+
+    def test_firewall_speed(self, checked=False):
+        axis = self.test_speed_axis.currentText().split()[0]
+        speed = self.test_speed.value(); limit = 25 if axis == "M1" else 1000
+        accepted = speed <= limit
+        detail = ("%s=%dRPM，允许范围1～%dRPM" % (axis, speed, limit))
+        self.show_firewall_test(accepted, "速度限幅", detail, "FPGA执行参数硬限幅层")
+        if accepted:
+            amount = self.test_speed_distance.value()
+            current, low, high = self.backend.positions[axis], {"M1":0,"M2":0,"M3":28.5}[axis], {"M1":350,"M2":150,"M3":300}[axis]
+            if not low <= current + amount <= high:
+                self.show_firewall_test(False, "速度限幅", "测试位移导致目标越界", "位置二次限幅层")
+                return
+            self.move_axis_at_speed(axis, amount, speed, "合法速度已放行并执行")
+
+    def move_axis_at_speed(self, axis, amount, speed, label):
+        try:
+            pulses = self.backend.move(axis, amount, speed)
+            for line in self.backend.take_write_trace(): self.append_log(line)
+            self.set_motion_label(axis, "运动中", "motionBusy")
+            self.set_safety_status(axis, "运动中", "busy")
+            self.safety_log.append("[EXEC] %s：%s %+.2f，%dRPM，%d脉冲" %
+                                   (label, axis, amount, speed, pulses))
+        except Exception as error:
+            self.show_firewall_test(False, label, str(error), "运行时互锁层")
 
     def update_demo_telemetry(self):
         if not hasattr(self, "telemetry_labels"):
@@ -1160,6 +1300,8 @@ class RemoteWindow(QMainWindow):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         box_colors = {"红": (30, 30, 245), "黄": (0, 225, 255),
                       "浅蓝": (255, 190, 70), "绿": (50, 220, 70)}
+        box_labels = {"红": "Red", "黄": "Yellow",
+                      "浅蓝": "Light Blue", "绿": "Green"}
         kernel = np.ones((5, 5), dtype=np.uint8)
         for name, boxes in self.hsv_controls.items():
             values = [box.value() for box in boxes]
@@ -1178,7 +1320,7 @@ class RemoteWindow(QMainWindow):
                 x, y, w, h = cv2.boundingRect(contour)
                 color = box_colors[name]
                 cv2.rectangle(shown, (x, y), (x+w, y+h), color, 3)
-                cv2.putText(shown, "%s %.0fpx" % (name, area),
+                cv2.putText(shown, "%s %.0fpx" % (box_labels[name], area),
                             (x, max(22, y-7)), cv2.FONT_HERSHEY_SIMPLEX,
                             0.65, color, 2)
 
@@ -1619,6 +1761,16 @@ class RemoteWindow(QMainWindow):
     def send_servos(self):
         self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
                         "舵机命令：旋转=%d° 夹爪=%d°" % (self.rotate.value(), self.grip.value()))
+        self.refresh_positions()
+
+    def send_rotate_servo(self, checked=False):
+        self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.backend.servo_grip),
+                        "旋转舵机 → %d°" % self.rotate.value())
+        self.refresh_positions()
+
+    def send_grip_servo(self, checked=False):
+        self.run_action(lambda: self.backend.set_servos(self.backend.servo_rotate, self.grip.value()),
+                        "夹爪舵机 → %d°" % self.grip.value())
         self.refresh_positions()
 
     def trigger_em(self, index):
