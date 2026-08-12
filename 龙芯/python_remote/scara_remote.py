@@ -62,7 +62,6 @@ ARM_L3_CM = 9.5
 M3_HOME_DEG = 28.5
 SERVO_HOME_DEG = 127.0
 M1_SPEED_LIMIT_RPM = 25
-M2_AUTO_SPEED_RPM = 200
 GRIP_OPEN_DEG = 30
 GRIP_CLOSED_DEG = 105
 WAITING_Z_MM = 10.0
@@ -560,9 +559,7 @@ class RemoteBackend(object):
             "pulses": pulses,
             "started": now,
             "earliest_done": now + 0.25,
-            # 升降轴负载、加减速和驱动器内部速度映射会带来较大误差，固定放宽到60秒。
-            "deadline": now + (60.0 if axis == "M2" else
-                               max(3.5, theoretical_seconds + 1.5)),
+            "deadline": now + max(3.5, theoretical_seconds + 1.5),
         }
         return pulses
 
@@ -1089,10 +1086,18 @@ class RemoteWindow(QMainWindow):
             zg.addWidget(QLabel(axis), row, 0); zg.addWidget(value, row, 1); zg.addWidget(button, row, 2)
         all_zero = QPushButton("确认全部机械复位点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
         zg.addWidget(all_zero, 5, 0, 1, 3)
-        z_up = QPushButton("Z轴向上 10 mm（辅助归位）")
-        z_up.setMinimumHeight(42); z_up.clicked.connect(self.raise_z_for_homing)
-        zg.addWidget(z_up, 6, 0, 1, 3)
-        z_hint = QLabel("可重复点击使Z轴逐次上升；接近最高机械零点后，再点“设M2为复位点”。")
+        z_up_10 = QPushButton("Z轴向上 10 mm")
+        z_up_25 = QPushButton("Z轴向上 25 mm")
+        z_up_50 = QPushButton("Z轴向上 50 mm")
+        for button in (z_up_10, z_up_25, z_up_50):
+            button.setMinimumHeight(42)
+        z_up_10.clicked.connect(lambda: self.raise_z_for_homing(10.0))
+        z_up_25.clicked.connect(lambda: self.raise_z_for_homing(25.0))
+        z_up_50.clicked.connect(lambda: self.raise_z_for_homing(50.0))
+        zg.addWidget(z_up_10, 6, 0)
+        zg.addWidget(z_up_25, 6, 1)
+        zg.addWidget(z_up_50, 6, 2)
+        z_hint = QLabel("辅助归位可按剩余距离选择10/25/50mm；接近最高机械零点后，再点“设M2为复位点”。")
         z_hint.setWordWrap(True); zg.addWidget(z_hint, 7, 0, 1, 3)
         self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 8, 0, 1, 3)
         layout.addWidget(zero_box, 1)
@@ -1646,12 +1651,12 @@ class RemoteWindow(QMainWindow):
             ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0),
             ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
+            ("M2", WAITING_Z_MM, self.speed.value()),
         ], "前往等待区：先调整平面关节，再张开夹爪，最后下降到10mm")
 
     def go_home(self, checked=False):
         self.start_coordinate_sequence([
-            ("M2", 0.0, M2_AUTO_SPEED_RPM),
+            ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM),
             ("M3", 90.0, self.speed.value()),
             ("SERVO", 127.0, 0),
@@ -1678,7 +1683,7 @@ class RemoteWindow(QMainWindow):
         queue = [
             ("MARK", "阶段1/6：复位与安全自检", 0),
             # 复位：最高点、关节复位、夹爪闭合。
-            ("M2", 0.0, M2_AUTO_SPEED_RPM),
+            ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
@@ -1686,25 +1691,25 @@ class RemoteWindow(QMainWindow):
             # 等待区：先平面关节和旋转舵机，再张开夹爪，最后下降Z。
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
+            ("M2", WAITING_Z_MM, self.speed.value()),
             ("MARK", "阶段3/6：视觉定位并抓取物料", 0),
             # 取料区：先平面定位，再下降，确认Z到位后闭合。
             ("M1", p["M1"], M1_SPEED_LIMIT_RPM), ("M3", p["M3"], self.speed.value()),
-            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, M2_AUTO_SPEED_RPM),
+            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
             ("MARK", "阶段4/6：移动到颜色对应料筐并释放", 0),
             # 放料区：先抬升，再平面定位，所有轴到位后张开。
-            ("M2", PLACE_Z_MM, M2_AUTO_SPEED_RPM),
+            ("M2", PLACE_Z_MM, self.speed.value()),
             ("M1", d["M1"], M1_SPEED_LIMIT_RPM), ("M3", d["M3"], self.speed.value()),
             ("SERVO", d["SERVO"], 0), ("GRIP", GRIP_OPEN_DEG, 0),
             ("MARK", "阶段5/6：返回等待区", 0),
             # 回等待区：先Z，再平面定位，夹爪保持张开。
-            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
+            ("M2", WAITING_Z_MM, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
             ("MARK", "阶段6/6：安全复位并结束", 0),
             # 回复位区：先Z，再平面关节，最后保持夹爪张开。
-            ("M2", 0.0, M2_AUTO_SPEED_RPM),
+            ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_OPEN_DEG, 0),
@@ -1720,7 +1725,7 @@ class RemoteWindow(QMainWindow):
         planar = [("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
                   ("M3", solution["M3"], self.speed.value()),
                   ("SERVO", solution["SERVO"], 0)]
-        z_step = [("M2", self.coord_z.value(), M2_AUTO_SPEED_RPM)]
+        z_step = [("M2", self.coord_z.value(), self.speed.value())]
         grip_target = int(self.coord_grip.currentData())
         grip_step = [("GRIP", grip_target, 0)]
         if grip_target == GRIP_CLOSED_DEG:
@@ -1834,12 +1839,12 @@ class RemoteWindow(QMainWindow):
         self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self.save_zero_data(); self.append_log("%s当前位置设为机械复位点，逻辑位置=%.1f" % (axis, HOME_POSITIONS[axis])); self.refresh_positions(); self.refresh_zero_labels()
 
-    def raise_z_for_homing(self, checked=False):
+    def raise_z_for_homing(self, distance_mm=10.0):
         if "M2" in self.backend.pending_motions:
-            QMessageBox.warning(self, "Z轴忙", "请等待本次向上10mm动作到位")
+            QMessageBox.warning(self, "Z轴忙", "请等待本次辅助归位动作到位")
             return
-        # M2逻辑正方向向下，因此辅助归位向上移动10mm使用负相对位移。
-        self.move_axis("M2", -10.0)
+        # M2逻辑正方向向下，因此辅助归位向上移动使用负相对位移。
+        self.move_axis("M2", -float(distance_mm))
 
     def calibrate_all(self):
         for axis in ("M1", "M2", "M3", "M4"):
