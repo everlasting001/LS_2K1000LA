@@ -11,7 +11,7 @@ Compiling module 'uart_rx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPG
 Compiling module 'uart_tx'("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\uart_tx.v":16)
 WARN  (EX3791) : Expression size 16 truncated to fit in target size 8("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":176)
 WARN  (EX3791) : Expression size 16 truncated to fit in target size 8("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":177)
-WARN  (EX3791) : Expression size 144 truncated to fit in target size 96("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":517)
+WARN  (EX3791) : Expression size 144 truncated to fit in target size 96("E:\GOWIN_Project\FourAxisRobotsWithFPGA\2K1000LA\FPGA\CoreCodes\src\top.v":521)
 NOTE  (EX0101) : Current top module is "top"
 [5%] Running netlist conversion ...
 Running device independent optimization ...

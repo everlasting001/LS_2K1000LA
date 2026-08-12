@@ -840,6 +840,7 @@ class RemoteWindow(QMainWindow):
 
     def safety_demo_tab(self):
         page = QWidget(); main = QHBoxLayout(page)
+        self.safety_page = page
         left = QVBoxLayout()
         title = QLabel("FPGA 异构硬件防火墙 · 完整分拣安全演示")
         title.setObjectName("title"); left.addWidget(title)
@@ -1216,6 +1217,7 @@ class RemoteWindow(QMainWindow):
         self.coord_x.setValue(x); self.coord_y.setValue(y)
         self.safety_log.append("[PASS] 视觉多数票=%s，目标筐=(%.1f, %.1f)" % (color, x, y))
         self.safety_stage.setText("视觉识别完成：%s，准备启动机械臂" % color)
+        self.tabs.setCurrentWidget(self.safety_page)
         self.execute_sorting_cycle()
 
     def abort_safety_demo(self, reason):
@@ -1225,6 +1227,8 @@ class RemoteWindow(QMainWindow):
         self.safety_demo_active = False
         self.safety_stage.setText("安全阻断：%s" % reason)
         self.safety_log.append("[BLOCK] %s" % reason)
+        if hasattr(self, "safety_page"):
+            self.tabs.setCurrentWidget(self.safety_page)
 
     def connect_backend(self):
         simulation = self.mode.currentIndex() == 0

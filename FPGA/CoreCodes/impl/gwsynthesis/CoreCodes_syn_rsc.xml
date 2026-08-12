@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Module name="top" Register="691" Alu="22" Lut="1210" T_Register="835(691)" T_Alu="22(22)" T_Lut="1550(1210)">
- <SubModule name="u_i2c" Register="64" Lut="215" T_Register="64(64)" T_Lut="215(215)"/>
- <SubModule name="u_rx" Register="34" Lut="41" T_Register="34(34)" T_Lut="41(41)"/>
+<Module name="top" Register="699" Alu="30" Lut="1209" T_Register="843(699)" T_Alu="30(30)" T_Lut="1557(1209)">
+ <SubModule name="u_i2c" Register="64" Lut="224" T_Register="64(64)" T_Lut="224(224)"/>
+ <SubModule name="u_rx" Register="34" Lut="40" T_Register="34(34)" T_Lut="40(40)"/>
  <SubModule name="u_tx" Register="23" Lut="42" T_Register="23(23)" T_Lut="42(42)"/>
  <SubModule name="u_dbg" Register="23" Lut="42" T_Register="23(23)" T_Lut="42(42)"/>
 </Module>
