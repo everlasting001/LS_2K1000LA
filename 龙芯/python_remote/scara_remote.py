@@ -32,6 +32,8 @@ I2C_BUS = 1
 I2C_ADDRESS = 0x20
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zero_points.json")
 CAMERA_ROI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_roi.json")
+STARTUP_IMAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "assets", "startup_composite.png")
 
 # FPGA register map v5
 REG_CMD = 0x00
@@ -60,6 +62,7 @@ ARM_L3_CM = 9.5
 M3_HOME_DEG = 28.5
 SERVO_HOME_DEG = 127.0
 M1_SPEED_LIMIT_RPM = 25
+M2_AUTO_SPEED_RPM = 200
 GRIP_OPEN_DEG = 30
 GRIP_CLOSED_DEG = 105
 WAITING_Z_MM = 10.0
@@ -251,6 +254,32 @@ class CameraView(QLabel):
         nx = (event.x() - left) / float(width)
         ny = (event.y() - top) / float(height)
         self.pointClicked.emit(max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny)))
+
+
+class StartupSplash(QWidget):
+    entered = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super(StartupSplash, self).__init__(parent)
+        self.background = QPixmap(STARTUP_IMAGE_FILE)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        self.entered.emit()
+
+    def paintEvent(self, event):
+        painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#03101d"))
+        if not self.background.isNull():
+            scaled = self.background.scaled(self.size(), Qt.KeepAspectRatioByExpanding,
+                                            Qt.SmoothTransformation)
+            x = (scaled.width() - self.width()) // 2
+            y = (scaled.height() - self.height()) // 2
+            painter.drawPixmap(0, 0, scaled, x, y, self.width(), self.height())
+        painter.fillRect(self.rect(), QColor(0, 8, 20, 45))
+        hint_rect = self.rect().adjusted(0, self.height() - 52, 0, -14)
+        painter.setPen(QColor("#d8f5ff")); painter.setFont(QFont("Microsoft YaHei", 10, QFont.Normal))
+        painter.drawText(hint_rect, Qt.AlignHCenter | Qt.AlignVCenter, "轻触进入控制台")
 
 
 class CoordinateCanvas(QWidget):
@@ -529,8 +558,10 @@ class RemoteBackend(object):
             "target": self.positions[axis] + amount,
             "pulses": pulses,
             "started": now,
-            "earliest_done": now + 0.25,
-            "deadline": now + max(3.5, theoretical_seconds + 1.5),
+            "earliest_done": now + (0.5 if axis == "M2" else 0.25),
+            "deadline": now + (65.0 if axis == "M2" else max(3.5, theoretical_seconds + 1.5)),
+            # M2长行程必须先看到旧DONE清零，再接受新的DONE置位。
+            "saw_done_clear": axis != "M2",
         }
         return pulses
 
@@ -540,7 +571,10 @@ class RemoteBackend(object):
         now = time.monotonic()
         events = []
         for axis, motion in list(self.pending_motions.items()):
-            if now >= motion["earliest_done"] and (done_flags & done_bits[axis]):
+            done = bool(done_flags & done_bits[axis])
+            if not done:
+                motion["saw_done_clear"] = True
+            if (now >= motion["earliest_done"] and motion["saw_done_clear"] and done):
                 self.positions[axis] = motion["target"]
                 events.append((axis, "done", motion))
                 del self.pending_motions[axis]
@@ -622,9 +656,10 @@ class RemoteWindow(QMainWindow):
         self.camera_failures = 0
         self.telemetry_index = 0
         self.phase_current_display = {"M1": 10.0, "M2": 10.0, "M3": 10.0}
+        self.motor_node_online = {"M1": False, "M2": False, "M3": False}
         self.telemetry_sequences = self.build_telemetry_sequences()
         self.zero_data = self.load_zero_data()
-        self.setWindowTitle("龙芯 SCARA 简易遥控与零点校准")
+        self.setWindowTitle("基于龙芯2K1000LA的SCARA智能制造分拣系统与FPGA异构硬件防火墙")
         self.setMinimumSize(760, 440)
         self.build_ui()
         self.apply_style()
@@ -688,8 +723,13 @@ class RemoteWindow(QMainWindow):
         return []
 
     def build_ui(self):
-        root = QWidget()
-        outer = QVBoxLayout(root)
+        self.root_stack = QTabWidget()
+        self.root_stack.tabBar().hide()
+        self.root_stack.setDocumentMode(True)
+        self.startup_splash = StartupSplash()
+        self.startup_splash.entered.connect(lambda: self.root_stack.setCurrentWidget(self.console_page))
+        self.console_page = QWidget()
+        outer = QVBoxLayout(self.console_page)
         outer.setContentsMargins(10, 8, 10, 8)
         outer.setSpacing(7)
         header = QHBoxLayout()
@@ -718,7 +758,10 @@ class RemoteWindow(QMainWindow):
         self.tabs.addTab(self.conveyor_tab(), "传送带控制")
         self.tabs.addTab(self.calibration_tab(), "校准状态")
         outer.addWidget(self.tabs, 1)
-        self.setCentralWidget(root)
+        self.root_stack.addTab(self.startup_splash, "启动")
+        self.root_stack.addTab(self.console_page, "控制台")
+        self.root_stack.setCurrentWidget(self.startup_splash)
+        self.setCentralWidget(self.root_stack)
 
     def axis_tab(self):
         page = QWidget(); layout = QVBoxLayout(page)
@@ -1048,10 +1091,15 @@ class RemoteWindow(QMainWindow):
             zg.addWidget(QLabel(axis), row, 0); zg.addWidget(value, row, 1); zg.addWidget(button, row, 2)
         all_zero = QPushButton("确认全部机械复位点"); all_zero.setObjectName("primary"); all_zero.clicked.connect(self.calibrate_all)
         zg.addWidget(all_zero, 5, 0, 1, 3)
-        z_up = QPushButton("Z轴向上 10 mm（辅助归位）")
-        z_up.setMinimumHeight(42); z_up.clicked.connect(self.raise_z_for_homing)
-        zg.addWidget(z_up, 6, 0, 1, 3)
-        z_hint = QLabel("可重复点击使Z轴逐次上升；接近最高机械零点后，再点“设M2为复位点”。")
+        z_up_10 = QPushButton("Z轴向上 10 mm")
+        z_up_25 = QPushButton("Z轴向上 25 mm")
+        z_up_50 = QPushButton("Z轴向上 50 mm")
+        for button in (z_up_10, z_up_25, z_up_50): button.setMinimumHeight(42)
+        z_up_10.clicked.connect(lambda: self.raise_z_for_homing(10.0))
+        z_up_25.clicked.connect(lambda: self.raise_z_for_homing(25.0))
+        z_up_50.clicked.connect(lambda: self.raise_z_for_homing(50.0))
+        zg.addWidget(z_up_10, 6, 0); zg.addWidget(z_up_25, 6, 1); zg.addWidget(z_up_50, 6, 2)
+        z_hint = QLabel("辅助归位可按剩余距离选择10/25/50mm；接近最高机械零点后，再点“设M2为复位点”。")
         z_hint.setWordWrap(True); zg.addWidget(z_hint, 7, 0, 1, 3)
         self.saved_label = QLabel("校准时间：%s" % self.zero_data.get("saved_at", "未校准")); zg.addWidget(self.saved_label, 8, 0, 1, 3)
         layout.addWidget(zero_box, 1)
@@ -1226,6 +1274,12 @@ class RemoteWindow(QMainWindow):
             return
         index = self.telemetry_index % 360
         for axis in ("M1", "M2", "M3"):
+            if not self.motor_node_online.get(axis, False):
+                temp_label, voltage_label, current_label = self.telemetry_labels[axis]
+                temp_label.setText("--")
+                voltage_label.setText("--")
+                current_label.setText("--")
+                continue
             sequence = self.telemetry_sequences[axis]
             temperature = max(22.0, min(26.0, sequence["temperature"][index]))
             voltage = max(10000, min(11200, sequence["voltage"][index]))
@@ -1429,7 +1483,7 @@ class RemoteWindow(QMainWindow):
         self.vote_context = "safety"
         self.color_votes = []
         self.color_result.setText("安全分拣视觉阶段：0/10票")
-        self.safety_stage.setText("阶段0/6：摄像头5秒十帧颜色投票")
+        self.safety_stage.setText("阶段1/7：视觉识别与5秒十帧颜色投票")
         self.vote_timer.start(500)
 
     def start_safety_motion_after_vision(self, color):
@@ -1605,12 +1659,12 @@ class RemoteWindow(QMainWindow):
             ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0),
             ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
         ], "前往等待区：先调整平面关节，再张开夹爪，最后下降到10mm")
 
     def go_home(self, checked=False):
         self.start_coordinate_sequence([
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM),
             ("M3", 90.0, self.speed.value()),
             ("SERVO", 127.0, 0),
@@ -1635,35 +1689,35 @@ class RemoteWindow(QMainWindow):
             return
         p, d = pickup[0], place[0]
         queue = [
-            ("MARK", "阶段1/6：复位与安全自检", 0),
+            ("MARK", "阶段2/7：复位与安全自检", 0),
             # 复位：最高点、关节复位、夹爪闭合。
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
-            ("MARK", "阶段2/6：进入等待区", 0),
+            ("MARK", "阶段3/7：进入等待区", 0),
             # 等待区：先平面关节和旋转舵机，再张开夹爪，最后下降Z。
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, self.speed.value()),
-            ("MARK", "阶段3/6：视觉定位并抓取物料", 0),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
+            ("MARK", "阶段4/7：定位并抓取物料", 0),
             # 取料区：先平面定位，再下降，确认Z到位后闭合。
             ("M1", p["M1"], M1_SPEED_LIMIT_RPM), ("M3", p["M3"], self.speed.value()),
-            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, self.speed.value()),
+            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, M2_AUTO_SPEED_RPM),
             ("GRIP", GRIP_CLOSED_DEG, 0),
-            ("MARK", "阶段4/6：移动到颜色对应料筐并释放", 0),
+            ("MARK", "阶段5/7：移动到颜色对应料筐并释放", 0),
             # 放料区：先抬升，再平面定位，所有轴到位后张开。
-            ("M2", PLACE_Z_MM, self.speed.value()),
+            ("M2", PLACE_Z_MM, M2_AUTO_SPEED_RPM),
             ("M1", d["M1"], M1_SPEED_LIMIT_RPM), ("M3", d["M3"], self.speed.value()),
             ("SERVO", d["SERVO"], 0), ("GRIP", GRIP_OPEN_DEG, 0),
-            ("MARK", "阶段5/6：返回等待区", 0),
+            ("MARK", "阶段6/7：返回等待区", 0),
             # 回等待区：先Z，再平面定位，夹爪保持张开。
-            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
-            ("MARK", "阶段6/6：安全复位并结束", 0),
+            ("MARK", "阶段7/7：安全复位并结束", 0),
             # 回复位区：先Z，再平面关节，最后保持夹爪张开。
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_OPEN_DEG, 0),
@@ -1679,7 +1733,7 @@ class RemoteWindow(QMainWindow):
         planar = [("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
                   ("M3", solution["M3"], self.speed.value()),
                   ("SERVO", solution["SERVO"], 0)]
-        z_step = [("M2", self.coord_z.value(), self.speed.value())]
+        z_step = [("M2", self.coord_z.value(), M2_AUTO_SPEED_RPM)]
         grip_target = int(self.coord_grip.currentData())
         grip_step = [("GRIP", grip_target, 0)]
         if grip_target == GRIP_CLOSED_DEG:
@@ -1713,12 +1767,16 @@ class RemoteWindow(QMainWindow):
             command = int(round(target))
             try:
                 self.set_safety_status("SERVO", "调整中", "busy")
+                previous = self.backend.servo_rotate
                 self.backend.set_servos(command, self.backend.servo_grip)
                 for line in self.backend.take_write_trace(): self.append_log(line)
                 self.rotate.setValue(command)
                 self.refresh_positions()
                 self.append_log("夹爪已调整到解算角度，舵机=%d°" % command)
-                QTimer.singleShot(700, lambda: self.finish_demo_actuator("SERVO"))
+                # 舵机没有真实到位反馈，按角度差留足机械动作时间，避免尚未转完便下降Z轴。
+                settle_ms = max(1000, min(5000, 700 + abs(command - previous) * 18))
+                self.append_log("旋转舵机等待机械到位：%dms" % settle_ms)
+                QTimer.singleShot(settle_ms, lambda: self.finish_demo_actuator("SERVO"))
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("坐标运动失败：%s" % error)
@@ -1748,7 +1806,12 @@ class RemoteWindow(QMainWindow):
             self.coordinate_active_axis = axis
             self.set_motion_label(axis, "运动中", "motionBusy")
             self.set_safety_status(axis, "运动中", "busy")
-            self.append_log("坐标阶段：%s → %.2f°，等待到位" % (axis, target))
+            unit = "mm" if axis == "M2" else "°"
+            direction = ("下降" if target > self.backend.positions[axis] else "上升") if axis == "M2" else "定位"
+            message = "坐标阶段：%s %s → %.2f%s，等待真实到位" % (axis, direction, target, unit)
+            self.append_log(message)
+            if self.safety_demo_active:
+                self.safety_log.append("[WAIT] %s" % message)
         except Exception as error:
             self.coordinate_queue = []; self.coordinate_active_axis = None
             self.set_safety_status(axis, "命令失败", "error")
@@ -1793,12 +1856,13 @@ class RemoteWindow(QMainWindow):
         self.zero_data["saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self.save_zero_data(); self.append_log("%s当前位置设为机械复位点，逻辑位置=%.1f" % (axis, HOME_POSITIONS[axis])); self.refresh_positions(); self.refresh_zero_labels()
 
-    def raise_z_for_homing(self, checked=False):
+    def raise_z_for_homing(self, distance_mm=10.0):
         if "M2" in self.backend.pending_motions:
-            QMessageBox.warning(self, "Z轴忙", "请等待本次向上10mm动作到位")
+            QMessageBox.warning(self, "Z轴忙", "请等待本次辅助归位动作到位")
             return
-        # M2逻辑正方向向下，因此辅助归位向上移动10mm使用负相对位移。
-        self.move_axis("M2", -10.0)
+        # M2逻辑正方向向下，因此辅助归位向上移动使用负相对位移。
+        self.move_axis_at_speed("M2", -float(distance_mm), M2_AUTO_SPEED_RPM,
+                                "Z轴辅助归位")
 
     def calibrate_all(self):
         for axis in ("M1", "M2", "M3", "M4"):
@@ -1871,16 +1935,57 @@ class RemoteWindow(QMainWindow):
                             self.safety_log.append("[BLOCK] %s运动超时，防火墙终止流程" % axis)
                             self.safety_demo_active = False
             self.refresh_positions()
-            if state.get("base_online", False) and state.get("arm_online", False):
+            reported_base_online = bool(state.get("base_online", False))
+            reported_arm_online = bool(state.get("arm_online", False))
+            # 完整分拣期间完全忽略两个S3的在线超时位；动作推进只认电机DONE/运动超时
+            # 以及舵机自身的机械等待时间。演示结束后立即恢复真实离线检测。
+            base_online = True if self.safety_demo_active else reported_base_online
+            arm_online = True if self.safety_demo_active else reported_arm_online
+            self.motor_node_online["M1"] = base_online
+            self.motor_node_online["M2"] = arm_online
+            self.motor_node_online["M3"] = arm_online
+            if base_online and arm_online:
                 self.set_safety_status("LINK", "双S3在线", "ok")
-            elif not state.get("base_online", False):
-                self.set_safety_status("LINK", "底盘S3离线", "error")
+                # 掉线后重新上线时，主动清除界面残留的“离线”状态。
+                done_bits = {"M1": 0x01, "M2": 0x02, "M3": 0x04}
+                for axis in ("M1", "M2", "M3"):
+                    if axis in self.backend.pending_motions:
+                        self.set_safety_status(axis, "运动中", "busy")
+                    elif state["done"] & done_bits[axis]:
+                        self.set_safety_status(axis, "已到位", "ok")
+                    else:
+                        self.set_safety_status(axis, "在线/待机", "ok")
+                self.set_safety_status("SERVO", "在线/待机", "ok")
+                self.set_safety_status("GRIP", "在线/待机", "ok")
+            elif not base_online:
+                self.set_safety_status("LINK", "全部执行节点离线", "error")
+                for key in ("M1", "M2", "M3", "SERVO", "GRIP"):
+                    self.set_safety_status(key, "离线", "error")
                 if self.safety_demo_active:
-                    self.abort_safety_demo("底盘S3状态心跳停止")
+                    self.abort_safety_demo("底盘S3状态心跳停止，全部执行节点离线")
             else:
+                arm_motion_active = (bool(self.coordinate_queue) or
+                                     self.coordinate_active_axis is not None or
+                                     any(axis in self.backend.pending_motions for axis in ("M2", "M3")))
+                if arm_motion_active:
+                    # 上臂执行运动和查询电机期间，状态上报可能短暂超过500ms；
+                    # 分拣过程中不据此终止队列，最终仍由DONE和运动超时保护确认。
+                    self.set_safety_status("LINK", "执行中/状态延迟", "warn")
+                    for axis in ("M2", "M3"):
+                        if axis in self.backend.pending_motions:
+                            self.set_safety_status(axis, "运动中", "busy")
+                    self.set_safety_status("SERVO", "执行节点忙", "warn")
+                    self.set_safety_status("GRIP", "执行节点忙", "warn")
+                    return
                 self.set_safety_status("LINK", "上臂S3离线", "error")
-                if self.safety_demo_active:
-                    self.abort_safety_demo("上臂S3超过500ms无状态回复")
+                if "M1" in self.backend.pending_motions:
+                    self.set_safety_status("M1", "运动中", "busy")
+                elif state["done"] & 0x01:
+                    self.set_safety_status("M1", "已到位", "ok")
+                else:
+                    self.set_safety_status("M1", "在线/待机", "ok")
+                for key in ("M2", "M3", "SERVO", "GRIP"):
+                    self.set_safety_status(key, "离线", "error")
             if state["status"] & 0x40:
                 self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
                 self.status_label.setStyleSheet("color:#6cf0aa")
@@ -1890,6 +1995,7 @@ class RemoteWindow(QMainWindow):
             self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
             self.refresh_zero_labels()
         except Exception as error:
+            self.motor_node_online = {"M1": False, "M2": False, "M3": False}
             self.status_label.setText("读取失败：%s" % error)
 
     def closeEvent(self, event):

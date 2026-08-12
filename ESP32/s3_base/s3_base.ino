@@ -56,7 +56,8 @@ static void debug_hex_frame(const char *label, const uint8_t *data, size_t len) 
 // 执行端状态缓存
 static StatusPacket arm_status;
 
-// 执行端在线状态跟踪 (500ms 无数据视为离线)
+// 执行端在线状态跟踪 (2500ms 无数据视为离线)
+static const uint32_t ARM_OFFLINE_TIMEOUT_MS = 2500;
 static bool     arm_online        = false;
 static uint32_t arm_seen          = 0;     // 最后收到上臂状态的时间
 
@@ -316,8 +317,8 @@ static void reply_loop() {
     if (millis() - last_reply < 20) return;
     last_reply = millis();
 
-    // 超时检测: 500ms 无数据视为离线
-    arm_online      = arm_online      && (millis() - arm_seen      < 500);
+    // 上臂在电机动作/串口查询期间可能短暂延迟回包，留出充足余量。
+    arm_online = arm_online && (millis() - arm_seen < ARM_OFFLINE_TIMEOUT_MS);
 
     uint8_t r[18] = {
         0xAA,
