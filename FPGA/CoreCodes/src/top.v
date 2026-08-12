@@ -182,6 +182,7 @@ module top (
             8'h36: i2c_tx_data = reg_reject_reason;
             8'h37: i2c_tx_data = reg_reject_count[15:8];
             8'h38: i2c_tx_data = reg_reject_count[7:0];
+            8'h39: i2c_tx_data = reg_status_heartbeat;
             default: i2c_tx_data = 8'h00;
         endcase
     end
@@ -458,6 +459,7 @@ module top (
     reg [3:0] reg_em_state;
     reg [7:0] reg_remote_error;
     reg [7:0] reg_warn_flags, reg_done_flags;
+    reg [7:0] reg_status_heartbeat;
 
     always @(posedge clk_50m or negedge rst_n) begin
         if (!rst_n) begin
@@ -467,7 +469,9 @@ module top (
             reg_em_state <= 4'd0; reg_remote_error <= 8'd0;
             reg_warn_flags <= 8'h03; reg_done_flags <= 8'd0;
             reg_status <= 8'd0;
+            reg_status_heartbeat <= 8'd0;
         end else if (rx_got && crc8_frame17(rx_buf[135:0]) == rx_buf[143:136]) begin
+            reg_status_heartbeat <= reg_status_heartbeat + 1'b1;
             reg_status  <= {rx_buf[15:9], busy};
             reg_m2_pos  <= {rx_buf[31:24], rx_buf[23:16]};
             reg_m3_pos  <= {rx_buf[47:40], rx_buf[39:32]};

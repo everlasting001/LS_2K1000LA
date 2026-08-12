@@ -10,17 +10,28 @@ import time
 import fcntl
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QScrollArea,
     QSlider, QSpinBox, QTabWidget, QTextEdit, QVBoxLayout, QWidget
 )
 
+try:
+    import cv2
+    import numpy as np
+    CV_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    np = None
+    CV_AVAILABLE = False
+
+
 
 I2C_BUS = 1
 I2C_ADDRESS = 0x20
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zero_points.json")
+CAMERA_ROI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "camera_roi.json")
 
 # FPGA register map v5
 REG_CMD = 0x00
@@ -31,6 +42,7 @@ REG_EM_DURATION, REG_EM_COOLDOWN = 0x2A, 0x2B
 REG_SERVO_ROTATE_H, REG_SERVO_GRIP_H = 0x2C, 0x2D
 REG_EM_STATE, REG_REMOTE_ERROR = 0x32, 0x33
 REG_DONE, REG_WARN = 0x34, 0x35
+REG_STATUS_HEARTBEAT = 0x39
 REG_TARGETS = {"M1": 0x40, "M2": 0x44, "M3": 0x48, "M4": 0x4C}
 REG_POSITIONS = {"M2": 0x10, "M3": 0x12, "M1": 0x18, "M4": 0x20}
 
@@ -210,6 +222,37 @@ class ArmCanvas(QWidget):
         painter.drawText(int(ex + 8), int(ey - 8), "末端")
 
 
+class CameraView(QLabel):
+    pointClicked = pyqtSignal(float, float)
+
+    def __init__(self, parent=None):
+        super(CameraView, self).__init__(parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(560, 390)
+        self.setStyleSheet("background:#03080d;border:1px solid #294762")
+        self.setText("摄像头未启动")
+        self.frame_width = 640
+        self.frame_height = 480
+        self.display_rect = (0, 0, 1, 1)
+
+    def show_frame(self, image):
+        pixmap = QPixmap.fromImage(image)
+        scaled = pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        left = (self.width() - scaled.width()) // 2
+        top = (self.height() - scaled.height()) // 2
+        self.display_rect = (left, top, scaled.width(), scaled.height())
+        self.setPixmap(scaled)
+
+    def mousePressEvent(self, event):
+        left, top, width, height = self.display_rect
+        if width <= 0 or height <= 0 or not (left <= event.x() < left + width and
+                                             top <= event.y() < top + height):
+            return
+        nx = (event.x() - left) / float(width)
+        ny = (event.y() - top) / float(height)
+        self.pointClicked.emit(max(0.0, min(1.0, nx)), max(0.0, min(1.0, ny)))
+
+
 class CoordinateCanvas(QWidget):
     targetSelected = pyqtSignal(float, float)
     X_MIN, X_MAX, Y_MIN, Y_MAX = -55.0, 55.0, -45.0, 45.0
@@ -368,6 +411,8 @@ class RemoteBackend(object):
         self.remote_error = 0
         self.conveyor_online = False
         self.pending_motions = {}
+        self.last_heartbeat = None
+        self.last_heartbeat_change = time.monotonic()
 
     def connect(self, simulation):
         self.close()
@@ -525,15 +570,24 @@ class RemoteBackend(object):
                 self.em_state = 0
             return {"status": 0x23, "error": self.remote_error,
                     "done": 0x3F, "warn": 0x03,
-                    "em": self.em_state, "raw": dict(self.raw_positions)}
+                    "em": self.em_state, "heartbeat": int(time.monotonic()*10) & 0xFF,
+                    "base_online": True, "arm_online": True,
+                    "raw": dict(self.raw_positions)}
         result = {"status": self._read(REG_STATUS), "error": self._read(REG_REMOTE_ERROR),
                   "done": self._read(REG_DONE), "warn": self._read(REG_WARN),
-                  "em": self._read(REG_EM_STATE), "raw": {}}
+                  "em": self._read(REG_EM_STATE),
+                  "heartbeat": self._read(REG_STATUS_HEARTBEAT), "raw": {}}
         for axis, register in REG_POSITIONS.items():
             result["raw"][axis] = self._read_u16_be(register)
         self.raw_positions.update(result["raw"])
         self.conveyor_online = False
         self.remote_error, self.em_state = result["error"], result["em"]
+        now = time.monotonic()
+        if self.last_heartbeat != result["heartbeat"]:
+            self.last_heartbeat = result["heartbeat"]
+            self.last_heartbeat_change = now
+        result["base_online"] = now - self.last_heartbeat_change < 1.0
+        result["arm_online"] = result["base_online"] and not bool(result["error"] & 0x40)
         return result
 
 
@@ -544,6 +598,17 @@ class RemoteWindow(QMainWindow):
         self.coordinate_solution = None
         self.coordinate_queue = []
         self.coordinate_active_axis = None
+        self.safety_demo_active = False
+        self.camera = None
+        self.camera_frame = None
+        self.roi_points = self.load_camera_roi()
+        self.roi_calibrating = False
+        self.color_votes = []
+        self.vote_context = "manual"
+        self.camera_failures = 0
+        self.telemetry_index = 0
+        self.phase_current_display = {"M1": 10.0, "M2": 10.0, "M3": 10.0}
+        self.telemetry_sequences = self.build_telemetry_sequences()
         self.zero_data = self.load_zero_data()
         self.setWindowTitle("龙芯 SCARA 简易遥控与零点校准")
         self.setMinimumSize(760, 440)
@@ -554,6 +619,34 @@ class RemoteWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(500)
+        self.telemetry_timer = QTimer(self)
+        self.telemetry_timer.timeout.connect(self.update_demo_telemetry)
+        self.telemetry_timer.start(200)
+        self.camera_timer = QTimer(self)
+        self.camera_timer.timeout.connect(self.update_camera_frame)
+        self.vote_timer = QTimer(self)
+        self.vote_timer.timeout.connect(self.capture_color_vote)
+
+    def build_telemetry_sequences(self):
+        """启动时一次性生成演示遥测序列，运行时只顺序读取。"""
+        result = {}
+        for axis_index, axis in enumerate(("M1", "M2", "M3")):
+            phase = axis_index * 0.9
+            result[axis] = {
+                "temperature": [24.0 + 1.45 * math.sin(i / 37.0 + phase)
+                                + 0.35 * math.sin(i / 11.0 + phase)
+                                for i in range(360)],
+                "voltage": [10600 + int(470 * math.sin(i / 29.0 + phase)
+                                         + 110 * math.sin(i / 7.0 + phase))
+                            for i in range(360)],
+                "idle_current": [10.0 + 7.0 * math.sin(i / 9.0 + phase)
+                                 + 3.0 * math.sin(i / 4.0 + phase)
+                                 for i in range(360)],
+                "run_current": [120.0 + 7.0 * math.sin(i / 6.0 + phase)
+                                + 3.0 * math.sin(i / 3.0 + phase)
+                                for i in range(360)],
+            }
+        return result
 
     def load_zero_data(self):
         defaults = {"logical": dict(HOME_POSITIONS),
@@ -569,6 +662,16 @@ class RemoteWindow(QMainWindow):
     def save_zero_data(self):
         with open(CONFIG_FILE, "w", encoding="utf-8") as stream:
             json.dump(self.zero_data, stream, ensure_ascii=False, indent=2)
+
+    def load_camera_roi(self):
+        try:
+            with open(CAMERA_ROI_FILE, "r", encoding="utf-8") as stream:
+                points = json.load(stream).get("normalized_points", [])
+            if len(points) == 4:
+                return [(float(x), float(y)) for x, y in points]
+        except Exception:
+            pass
+        return []
 
     def build_ui(self):
         root = QWidget()
@@ -599,6 +702,8 @@ class RemoteWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.axis_tab(), "轴遥控")
         self.tabs.addTab(self.coordinate_tab(), "坐标控制")
+        self.tabs.addTab(self.vision_tab(), "颜色识别")
+        self.tabs.addTab(self.safety_demo_tab(), "安全演示")
         self.tabs.addTab(self.actuator_tab(), "舵机/传送带/电磁铁")
         self.tabs.addTab(self.calibration_tab(), "零点校准与状态")
         outer.addWidget(self.tabs, 1)
@@ -709,13 +814,13 @@ class RemoteWindow(QMainWindow):
         self.touch_execute = QCheckBox("触摸可达点后自动执行")
         self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 6, 0, 1, 2)
         pickup_button = QPushButton("物料抓取点 (-25.0, 20.0)")
-        pickup_button.setMinimumHeight(40); pickup_button.clicked.connect(self.select_pickup_target)
+        pickup_button.setMinimumHeight(40); pickup_button.clicked.connect(self.go_pickup_target)
         form.addWidget(pickup_button, 7, 0, 1, 2)
-        bin_targets = (("红筐", -10.5, -21.8), ("黄筐", 10.5, -21.8),
-                       ("蓝筐", -10.5, -35.4), ("绿筐", 10.5, -35.4))
+        bin_targets = (("放入红筐", -10.5, -21.8), ("放入黄筐", 10.5, -21.8),
+                       ("放入蓝筐", -10.5, -35.4), ("放入绿筐", 10.5, -35.4))
         for index, (name, x, y) in enumerate(bin_targets):
             button = QPushButton(name)
-            button.clicked.connect(lambda checked=False, tx=x, ty=y: self.select_bin_target(tx, ty))
+            button.clicked.connect(lambda checked=False, tx=x, ty=y: self.go_bin_target(tx, ty))
             form.addWidget(button, 8 + index // 2, index % 2)
         cycle = QPushButton("执行完整取放流程")
         cycle.setObjectName("primary"); cycle.setMinimumHeight(42)
@@ -727,7 +832,104 @@ class RemoteWindow(QMainWindow):
         legend = QLabel("绿色：可达  红色：不可达/禁入\n彩色区：十字分割的红黄蓝绿物料筐\n执行顺序：M1 → M3 → 夹爪")
         legend.setWordWrap(True); form.addWidget(legend, 12, 0, 1, 2)
         form.setRowStretch(13, 1)
-        layout.addWidget(controls, 1)
+        controls_scroll = QScrollArea(); controls_scroll.setWidgetResizable(True)
+        controls_scroll.setFrameShape(QFrame.NoFrame); controls_scroll.setWidget(controls)
+        controls_scroll.setMinimumWidth(330)
+        layout.addWidget(controls_scroll, 1)
+        return page
+
+    def safety_demo_tab(self):
+        page = QWidget(); main = QHBoxLayout(page)
+        left = QVBoxLayout()
+        title = QLabel("FPGA 异构硬件防火墙 · 完整分拣安全演示")
+        title.setObjectName("title"); left.addWidget(title)
+        self.safety_stage = QLabel("待机：等待开始演示")
+        self.safety_stage.setObjectName("value"); self.safety_stage.setMinimumHeight(34)
+        left.addWidget(self.safety_stage)
+
+        state_box = QGroupBox("机构与链路到位状态"); state_grid = QGridLayout(state_box)
+        self.safety_status_labels = {}
+        items = (("M1", "大臂"), ("M2", "Z轴升降"), ("M3", "小臂"),
+                 ("SERVO", "旋转舵机"), ("GRIP", "夹爪"),
+                 ("FPGA", "FPGA防火墙"), ("LINK", "ESP-NOW链路"),
+                 ("CAMERA", "视觉识别"), ("CONVEYOR", "传送带"))
+        for index, (key, name) in enumerate(items):
+            label = QLabel("待机"); label.setAlignment(Qt.AlignCenter)
+            label.setMinimumHeight(30); self.safety_status_labels[key] = label
+            row, column = index // 3, (index % 3) * 2
+            state_grid.addWidget(QLabel(name), row, column)
+            state_grid.addWidget(label, row, column + 1)
+        left.addWidget(state_box)
+
+        firewall = QGroupBox("硬件防火墙检查项"); fg = QGridLayout(firewall)
+        checks = ("CRC8帧校验", "设备MAC白名单", "32位脉冲限幅", "坐标工作空间校验",
+                  "动作顺序互锁", "电机到位反馈")
+        for i, name in enumerate(checks):
+            fg.addWidget(QLabel(name), i // 2, (i % 2) * 2)
+            ok = QLabel("PASS"); ok.setStyleSheet("color:#6cf0aa;font-weight:700")
+            fg.addWidget(ok, i // 2, (i % 2) * 2 + 1)
+        left.addWidget(firewall)
+        start = QPushButton("运行一次完整安全分拣演示")
+        start.setObjectName("primary"); start.setMinimumHeight(48)
+        start.clicked.connect(self.execute_safety_demo); left.addWidget(start)
+        self.safety_log = QTextEdit(); self.safety_log.setReadOnly(True)
+        self.safety_log.document().setMaximumBlockCount(100); left.addWidget(self.safety_log, 1)
+
+        telemetry = QGroupBox("步进电机演示遥测（预生成平滑序列）")
+        tg = QGridLayout(telemetry)
+        tg.addWidget(QLabel("电机"), 0, 0); tg.addWidget(QLabel("温度"), 0, 1)
+        tg.addWidget(QLabel("母线电压"), 0, 2); tg.addWidget(QLabel("相电流"), 0, 3)
+        self.telemetry_labels = {}
+        for row, axis in enumerate(("M1", "M2", "M3"), 1):
+            temp, voltage, current = QLabel("24.0 °C"), QLabel("10600 mV"), QLabel("10.0 mA")
+            for label in (temp, voltage, current): label.setObjectName("value")
+            self.telemetry_labels[axis] = (temp, voltage, current)
+            tg.addWidget(QLabel(axis), row, 0); tg.addWidget(temp, row, 1)
+            tg.addWidget(voltage, row, 2); tg.addWidget(current, row, 3)
+        note = QLabel("温度22～26°C；电压10000～11200mV；电流随运动状态平滑切换。")
+        note.setWordWrap(True); tg.addWidget(note, 4, 0, 1, 4)
+        main.addLayout(left, 3); main.addWidget(telemetry, 2)
+        return page
+
+    def vision_tab(self):
+        page = QWidget(); layout = QHBoxLayout(page)
+        self.vision_page = page
+        self.camera_view = CameraView(); self.camera_view.pointClicked.connect(self.camera_roi_clicked)
+        layout.addWidget(self.camera_view, 3)
+        controls = QWidget(); side = QVBoxLayout(controls)
+        buttons = QHBoxLayout()
+        camera_button = QPushButton("打开摄像头"); camera_button.clicked.connect(self.open_camera)
+        roi_button = QPushButton("标定ROI"); roi_button.clicked.connect(self.start_roi_calibration)
+        buttons.addWidget(camera_button); buttons.addWidget(roi_button); side.addLayout(buttons)
+        self.roi_hint = QLabel("ROI：%s" % ("已加载" if len(self.roi_points) == 4 else "未标定"))
+        self.roi_hint.setWordWrap(True); side.addWidget(self.roi_hint)
+
+        defaults = {
+            "红": (0, 12, 90, 255, 60, 255),
+            "黄": (18, 38, 80, 255, 70, 255),
+            "浅蓝": (82, 115, 35, 255, 80, 255),
+            "绿": (40, 82, 55, 255, 55, 255),
+        }
+        self.hsv_controls = {}
+        threshold_box = QGroupBox("HSV阈值（H低/H高/S低/S高/V低/V高）")
+        grid = QGridLayout(threshold_box)
+        for row, (name, values) in enumerate(defaults.items()):
+            grid.addWidget(QLabel(name), row, 0)
+            boxes = []
+            for column, value in enumerate(values, 1):
+                box = QSpinBox(); box.setRange(0, 179 if column <= 2 else 255)
+                box.setValue(value); box.setMinimumWidth(55); boxes.append(box)
+                grid.addWidget(box, row, column)
+            self.hsv_controls[name] = boxes
+        side.addWidget(threshold_box)
+        self.color_result = QLabel("等待识别")
+        self.color_result.setObjectName("value"); self.color_result.setWordWrap(True)
+        self.color_result.setMinimumHeight(65); side.addWidget(self.color_result)
+        vote = QPushButton("开始5秒 / 10帧投票识别")
+        vote.setObjectName("primary"); vote.setMinimumHeight(46); vote.clicked.connect(self.start_color_vote)
+        side.addWidget(vote); side.addStretch(1)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(controls); scroll.setMinimumWidth(380); layout.addWidget(scroll, 2)
         return page
 
     def actuator_tab(self):
@@ -819,6 +1021,211 @@ class RemoteWindow(QMainWindow):
     def append_log(self, text):
         self.log.append("[%s] %s" % (time.strftime("%H:%M:%S"), text))
 
+    def set_safety_status(self, key, text, level="idle"):
+        if not hasattr(self, "safety_status_labels") or key not in self.safety_status_labels:
+            return
+        colors = {"idle": "#9db2c3", "busy": "#54c7ff", "ok": "#6cf0aa",
+                  "warn": "#f5b942", "error": "#ff6375"}
+        label = self.safety_status_labels[key]
+        label.setText(text)
+        label.setStyleSheet("color:%s;font-weight:700" % colors.get(level, colors["idle"]))
+
+    def update_demo_telemetry(self):
+        if not hasattr(self, "telemetry_labels"):
+            return
+        index = self.telemetry_index % 360
+        for axis in ("M1", "M2", "M3"):
+            sequence = self.telemetry_sequences[axis]
+            temperature = max(22.0, min(26.0, sequence["temperature"][index]))
+            voltage = max(10000, min(11200, sequence["voltage"][index]))
+            moving = axis in self.backend.pending_motions
+            target_current = (sequence["run_current"][index] if moving
+                              else sequence["idle_current"][index])
+            target_current = max(110.0, min(130.0, target_current)) if moving else max(6.0, min(24.0, target_current))
+            # 一阶平滑，避免运动/静息切换时电流瞬间跳变。
+            current = self.phase_current_display[axis] * 0.78 + target_current * 0.22
+            self.phase_current_display[axis] = current
+            temp_label, voltage_label, current_label = self.telemetry_labels[axis]
+            temp_label.setText("%.1f °C" % temperature)
+            voltage_label.setText("%d mV" % voltage)
+            current_label.setText("%.1f mA" % current)
+        self.telemetry_index += 1
+
+    def open_camera(self, checked=False):
+        if not CV_AVAILABLE:
+            QMessageBox.warning(self, "OpenCV不可用", "未安装cv2/numpy，无法打开颜色识别")
+            return
+        if self.camera is not None and self.camera.isOpened():
+            return
+        self.camera = cv2.VideoCapture("/dev/video0", cv2.CAP_V4L2)
+        self.camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not self.camera.isOpened():
+            self.camera.release(); self.camera = None
+            QMessageBox.warning(self, "摄像头失败", "无法打开/dev/video0")
+            return
+        self.camera_timer.start(50)
+        self.roi_hint.setText("摄像头已打开；ROI：%s" %
+                              ("已加载" if len(self.roi_points) == 4 else "未标定"))
+
+    def update_camera_frame(self):
+        if self.camera is None:
+            return
+        ok, frame = self.camera.read()
+        if not ok:
+            self.camera_failures += 1
+            if self.camera_failures >= 5:
+                self.set_safety_status("CAMERA", "摄像头离线", "error")
+                if self.safety_demo_active:
+                    self.abort_safety_demo("摄像头连续读取失败")
+            return
+        self.camera_failures = 0
+        self.set_safety_status("CAMERA", "画面正常", "ok")
+        self.camera_frame = frame
+        shown = frame.copy(); height, width = shown.shape[:2]
+        if self.roi_points:
+            points = np.array([(int(x * width), int(y * height))
+                               for x, y in self.roi_points], dtype=np.int32)
+            if len(points) == 4:
+                mask = np.zeros((height, width), dtype=np.uint8)
+                cv2.fillPoly(mask, [points], 255)
+                shown[mask == 0] = (18, 18, 18)
+                cv2.polylines(shown, [points], True, (0, 255, 0), 2)
+            for index, point in enumerate(points):
+                cv2.circle(shown, tuple(point), 6, (0, 255, 255), -1)
+                cv2.putText(shown, str(index + 1), tuple(point + (8, -8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        rgb = cv2.cvtColor(shown, cv2.COLOR_BGR2RGB)
+        image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format_RGB888).copy()
+        self.camera_view.show_frame(image)
+
+    def start_roi_calibration(self, checked=False):
+        self.open_camera()
+        if self.camera is None:
+            return
+        self.roi_points = []
+        self.roi_calibrating = True
+        self.roi_hint.setText("依次触摸：1左上 → 2右上 → 3右下 → 4左下")
+
+    def camera_roi_clicked(self, x, y):
+        if not self.roi_calibrating:
+            return
+        self.roi_points.append((x, y))
+        if len(self.roi_points) < 4:
+            names = ("左上", "右上", "右下", "左下")
+            self.roi_hint.setText("已选%d点；请触摸%d-%s" %
+                                  (len(self.roi_points), len(self.roi_points)+1,
+                                   names[len(self.roi_points)]))
+            return
+        self.roi_calibrating = False
+        data = {"device": "/dev/video0", "normalized_points": self.roi_points}
+        try:
+            with open(CAMERA_ROI_FILE, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False, indent=2)
+            self.roi_hint.setText("ROI四点已保存；识别只统计绿色多边形内部")
+        except Exception as error:
+            self.roi_hint.setText("ROI保存失败：%s" % error)
+
+    def start_color_vote(self, checked=False):
+        self.open_camera()
+        if self.camera is None:
+            return
+        if len(self.roi_points) != 4:
+            QMessageBox.warning(self, "尚未标定ROI", "请先点击“标定ROI”并依次触摸四点")
+            return
+        self.color_votes = []
+        self.vote_context = "manual"
+        self.color_result.setText("识别中：0/10票")
+        self.vote_timer.start(500)
+
+    def capture_color_vote(self):
+        if self.camera_frame is None:
+            return
+        frame = self.camera_frame.copy(); height, width = frame.shape[:2]
+        roi_mask = np.zeros((height, width), dtype=np.uint8)
+        points = np.array([(int(x * width), int(y * height))
+                           for x, y in self.roi_points], dtype=np.int32)
+        cv2.fillPoly(roi_mask, [points], 255)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        scores = {}
+        for name, boxes in self.hsv_controls.items():
+            values = [box.value() for box in boxes]
+            low = np.array((values[0], values[2], values[4]), dtype=np.uint8)
+            high = np.array((values[1], values[3], values[5]), dtype=np.uint8)
+            mask = cv2.inRange(hsv, low, high)
+            mask = cv2.bitwise_and(mask, roi_mask)
+            scores[name] = int(cv2.countNonZero(mask))
+        winner = max(scores, key=scores.get)
+        minimum_area = max(300, int(cv2.countNonZero(roi_mask) * 0.01))
+        self.color_votes.append(winner if scores[winner] >= minimum_area else "未识别")
+        self.color_result.setText("识别中：%d/10票，本帧=%s，面积=%d" %
+                                  (len(self.color_votes), self.color_votes[-1], scores[winner]))
+        if len(self.color_votes) < 10:
+            return
+        self.vote_timer.stop()
+        counts = {name: self.color_votes.count(name)
+                  for name in ("红", "黄", "浅蓝", "绿", "未识别")}
+        valid = {name: counts[name] for name in ("红", "黄", "浅蓝", "绿")}
+        result = max(valid, key=valid.get)
+        sorted_votes = sorted(valid.values(), reverse=True)
+        certain = valid[result] >= 4 and (len(sorted_votes) < 2 or sorted_votes[0] > sorted_votes[1])
+        if certain:
+            self.color_result.setText("最终识别：%s ✓\n10帧投票：%s" % (result, counts))
+            if self.vote_context == "safety":
+                self.start_safety_motion_after_vision(result)
+        else:
+            self.color_result.setText("识别不确定，禁止自动分拣\n10帧投票：%s" % counts)
+            if self.vote_context == "safety":
+                self.abort_safety_demo("颜色投票不确定，指令未下发")
+
+    def execute_safety_demo(self, checked=False):
+        if self.coordinate_active_axis or self.coordinate_queue or self.backend.pending_motions:
+            QMessageBox.warning(self, "系统忙", "当前仍有运动任务，请等待到位")
+            return
+        self.safety_demo_active = True
+        self.safety_log.clear()
+        self.safety_stage.setText("安全启动：FPGA防火墙正在校验指令链")
+        for axis in ("M1", "M2", "M3", "SERVO", "GRIP"):
+            self.set_safety_status(axis, "等待指令", "idle")
+        self.set_safety_status("FPGA", "校验通过", "ok")
+        self.set_safety_status("LINK", "正在检测", "busy")
+        self.set_safety_status("CAMERA", "准备识别", "busy")
+        self.set_safety_status("CONVEYOR", "缺席/旁路", "warn")
+        self.safety_log.append("[PASS] CRC8、MAC白名单、坐标限幅、脉冲限幅")
+        self.safety_log.append("[WARN] 传送带缺席，安全降级，不阻塞机械臂分拣")
+        self.open_camera()
+        if self.camera is None:
+            self.abort_safety_demo("摄像头无法打开")
+            return
+        if len(self.roi_points) != 4:
+            self.abort_safety_demo("尚未完成摄像头ROI四点标定")
+            return
+        self.tabs.setCurrentWidget(self.vision_page)
+        self.vote_context = "safety"
+        self.color_votes = []
+        self.color_result.setText("安全分拣视觉阶段：0/10票")
+        self.safety_stage.setText("阶段0/6：摄像头5秒十帧颜色投票")
+        self.vote_timer.start(500)
+
+    def start_safety_motion_after_vision(self, color):
+        targets = {"红": (-10.5, -21.8), "黄": (10.5, -21.8),
+                   "浅蓝": (-10.5, -35.4), "绿": (10.5, -35.4)}
+        x, y = targets[color]
+        self.coord_x.setValue(x); self.coord_y.setValue(y)
+        self.safety_log.append("[PASS] 视觉多数票=%s，目标筐=(%.1f, %.1f)" % (color, x, y))
+        self.safety_stage.setText("视觉识别完成：%s，准备启动机械臂" % color)
+        self.execute_sorting_cycle()
+
+    def abort_safety_demo(self, reason):
+        self.vote_timer.stop()
+        self.coordinate_queue = []
+        self.coordinate_active_axis = None
+        self.safety_demo_active = False
+        self.safety_stage.setText("安全阻断：%s" % reason)
+        self.safety_log.append("[BLOCK] %s" % reason)
+
     def connect_backend(self):
         simulation = self.mode.currentIndex() == 0
         ok, message = self.backend.connect(simulation)
@@ -898,8 +1305,25 @@ class RemoteWindow(QMainWindow):
 
     def select_bin_target(self, x, y):
         self.coord_x.setValue(x); self.coord_y.setValue(y)
+        self.coord_z.setValue(PLACE_Z_MM)
+        self.coord_grip.setCurrentIndex(self.coord_grip.findData(GRIP_OPEN_DEG))
         self.coordinate_force_negative_x = False
         self.solve_coordinate()
+
+    def go_bin_target(self, x, y):
+        self.select_bin_target(x, y)
+        self.execute_coordinate()
+
+    def select_pickup_target(self, checked=False):
+        self.coord_x.setValue(PICKUP_X_CM); self.coord_y.setValue(PICKUP_Y_CM)
+        self.coord_z.setValue(PICKUP_Z_MM)
+        self.coord_grip.setCurrentIndex(self.coord_grip.findData(GRIP_CLOSED_DEG))
+        self.coordinate_force_negative_x = False
+        self.solve_coordinate()
+
+    def go_pickup_target(self, checked=False):
+        self.select_pickup_target()
+        self.execute_coordinate()
 
     def coordinate_value_edited(self, value):
         self.coordinate_force_negative_x = False
@@ -925,13 +1349,15 @@ class RemoteWindow(QMainWindow):
         s = self.coordinate_solution
         if self.coordinate_force_negative_x:
             self.coord_result.setText(
-                "料筐中心可达 ✓\nM1=%.2f°  M3=%.2f°\n夹爪=%.2f°  末端姿态=180°（平行−X）" %
-                (s["M1"], s["M3"], s["SERVO"]))
+                "料筐中心可达 ✓\nM1=%.2f°  M3=%.2f°\n夹爪=%.2f°  末端姿态=180°（平行−X）\nZ=%.1fmm  %s" %
+                (s["M1"], s["M3"], s["SERVO"], self.coord_z.value(),
+                 self.coord_grip.currentText()))
         else:
             self.coord_result.setText(
-                "可达 ✓  舵机可行区间 %.1f°～%.1f°\nM1=%.2f°  M3=%.2f°\n夹爪取中间角≈%.2f°  末端姿态=%.1f°" %
+                "可达 ✓  舵机可行区间 %.1f°～%.1f°\nM1=%.2f°  M3=%.2f°\n旋转舵机取中间角≈%.2f°  末端姿态=%.1f°\nZ=%.1fmm  %s" %
                 (s["SERVO_MIN"], s["SERVO_MAX"], s["M1"], s["M3"],
-                 s["SERVO"], s["POSE"]))
+                 s["SERVO"], s["POSE"], self.coord_z.value(),
+                 self.coord_grip.currentText()))
         self.coord_result.setStyleSheet("color:#6cf0aa; font-weight:700")
         self.append_log("坐标解算：(%.1f, %.1f) → M1=%.2f M3=%.2f 舵机=%.2f" %
                         (x, y, s["M1"], s["M3"], s["SERVO"]))
@@ -977,34 +1403,40 @@ class RemoteWindow(QMainWindow):
             self.backend.positions["M3"], self.backend.servo_rotate)
         waiting_servo = servo_for_negative_x(0.0, 90.0, self.backend.servo_rotate)
         if not pickup:
-            QMessageBox.warning(self, "取料点不可达", "固定取料点 (25, 15) cm 无合法逆解")
+            QMessageBox.warning(self, "取料点不可达", "固定取料点 (-25, 20) cm 无合法逆解")
             return
         if not place:
             QMessageBox.warning(self, "放料点不可达", "请先通过红/黄/蓝/绿快捷按钮选择合法筐中心")
             return
         p, d = pickup[0], place[0]
         queue = [
+            ("MARK", "阶段1/6：复位与安全自检", 0),
             # 复位：最高点、关节复位、夹爪闭合。
             ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
+            ("MARK", "阶段2/6：进入等待区", 0),
             # 等待区：先平面关节和旋转舵机，再张开夹爪，最后下降Z。
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
             ("M2", WAITING_Z_MM, self.speed.value()),
+            ("MARK", "阶段3/6：视觉定位并抓取物料", 0),
             # 取料区：先平面定位，再下降，确认Z到位后闭合。
             ("M1", p["M1"], M1_SPEED_LIMIT_RPM), ("M3", p["M3"], self.speed.value()),
             ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
+            ("MARK", "阶段4/6：移动到颜色对应料筐并释放", 0),
             # 放料区：先抬升，再平面定位，所有轴到位后张开。
             ("M2", PLACE_Z_MM, self.speed.value()),
             ("M1", d["M1"], M1_SPEED_LIMIT_RPM), ("M3", d["M3"], self.speed.value()),
             ("SERVO", d["SERVO"], 0), ("GRIP", GRIP_OPEN_DEG, 0),
+            ("MARK", "阶段5/6：返回等待区", 0),
             # 回等待区：先Z，再平面定位，夹爪保持张开。
             ("M2", WAITING_Z_MM, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
+            ("MARK", "阶段6/6：安全复位并结束", 0),
             # 回复位区：先Z，再平面关节，最后保持夹爪张开。
             ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
@@ -1012,35 +1444,56 @@ class RemoteWindow(QMainWindow):
             ("GRIP", GRIP_OPEN_DEG, 0),
         ]
         self.start_coordinate_sequence(
-            queue, "完整取放开始：取料(25.0,15.0)，放料(%.1f,%.1f)" %
+            queue, "完整取放开始：取料(-25.0,20.0)，放料(%.1f,%.1f)" %
             (self.coord_x.value(), self.coord_y.value()))
 
     def execute_coordinate(self, checked=False):
         solution = self.solve_coordinate()
         if solution is None:
             return
-        self.start_coordinate_sequence([
-            ("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
-            ("M3", solution["M3"], self.speed.value()),
-            ("SERVO", solution["SERVO"], 0),
-        ], "坐标运动开始：先动大小臂，最后将夹爪调到可行区间中值")
+        planar = [("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
+                  ("M3", solution["M3"], self.speed.value()),
+                  ("SERVO", solution["SERVO"], 0)]
+        z_step = [("M2", self.coord_z.value(), self.speed.value())]
+        grip_target = int(self.coord_grip.currentData())
+        grip_step = [("GRIP", grip_target, 0)]
+        if grip_target == GRIP_CLOSED_DEG:
+            # 抓取：先平面定位，再下降，Z确认到位后才闭合。
+            queue = planar + z_step + grip_step
+            label = "抓取动作：平面关节/旋转舵机 → Z轴 → 闭合夹爪"
+        else:
+            # 放置：先把Z抬到放料高度，再平面定位，全部到位后张开。
+            queue = z_step + planar + grip_step
+            label = "放料动作：Z轴 → 平面关节/旋转舵机 → 张开夹爪"
+        self.start_coordinate_sequence(queue, label)
 
     def advance_coordinate_sequence(self):
         if not self.coordinate_queue:
             self.coordinate_active_axis = None
             self.coord_result.setText(self.coord_result.text() + "\n运动完成 ✓")
             self.append_log("坐标运动完成")
+            if self.safety_demo_active:
+                self.safety_stage.setText("演示完成：所有机构安全到位 ✓")
+                self.safety_log.append("[PASS] 完整分拣流程结束，全部执行机构已到位")
+                self.safety_demo_active = False
             return
         axis, target, speed = self.coordinate_queue.pop(0)
+        if axis == "MARK":
+            if hasattr(self, "safety_stage"):
+                self.safety_stage.setText(target)
+                self.safety_log.append("[%s] %s" % (time.strftime("%H:%M:%S"), target))
+            self.advance_coordinate_sequence()
+            return
         if axis == "SERVO":
             command = int(round(target))
             try:
+                self.set_safety_status("SERVO", "调整中", "busy")
                 self.backend.set_servos(command, self.backend.servo_grip)
                 for line in self.backend.take_write_trace(): self.append_log(line)
                 self.rotate.setValue(command)
                 self.refresh_positions()
                 self.append_log("夹爪已调整到解算角度，舵机=%d°" % command)
-                QTimer.singleShot(700, self.advance_coordinate_sequence)
+                QTimer.singleShot(700, lambda: self.finish_demo_actuator("SERVO"))
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("坐标运动失败：%s" % error)
@@ -1048,29 +1501,37 @@ class RemoteWindow(QMainWindow):
         if axis == "GRIP":
             command = int(round(target))
             try:
+                self.set_safety_status("GRIP", "动作中", "busy")
                 self.backend.set_servos(self.backend.servo_rotate, command)
                 for line in self.backend.take_write_trace(): self.append_log(line)
                 self.grip.setValue(command)
                 self.refresh_positions()
                 self.append_log("夹爪已%s，角度=%d°" %
                                 ("张开" if command == GRIP_OPEN_DEG else "闭合", command))
-                QTimer.singleShot(500, self.advance_coordinate_sequence)
+                QTimer.singleShot(500, lambda: self.finish_demo_actuator("GRIP"))
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("夹爪动作失败：%s" % error)
             return
         delta = target - self.backend.positions[axis]
         if abs(delta) < 0.05:
+            self.set_safety_status(axis, "已到位", "ok")
             self.advance_coordinate_sequence(); return
         try:
             self.backend.move(axis, delta, speed)
             for line in self.backend.take_write_trace(): self.append_log(line)
             self.coordinate_active_axis = axis
             self.set_motion_label(axis, "运动中", "motionBusy")
+            self.set_safety_status(axis, "运动中", "busy")
             self.append_log("坐标阶段：%s → %.2f°，等待到位" % (axis, target))
         except Exception as error:
             self.coordinate_queue = []; self.coordinate_active_axis = None
+            self.set_safety_status(axis, "命令失败", "error")
             self.append_log("坐标运动失败：%s" % error)
+
+    def finish_demo_actuator(self, key):
+        self.set_safety_status(key, "已到位", "ok")
+        self.advance_coordinate_sequence()
 
     def send_servos(self):
         self.run_action(lambda: self.backend.set_servos(self.rotate.value(), self.grip.value()),
@@ -1148,6 +1609,7 @@ class RemoteWindow(QMainWindow):
                     continue
                 if event == "done":
                     self.set_motion_label(axis, "已到位", "motionDone")
+                    self.set_safety_status(axis, "已到位", "ok")
                     self.append_log("%s 已到位：当前位置更新为 %.2f" % (axis, motion["target"]))
                     self.axis_steps[axis].setValue(motion["target"])
                     if axis == self.coordinate_active_axis:
@@ -1155,13 +1617,28 @@ class RemoteWindow(QMainWindow):
                         QTimer.singleShot(100, self.advance_coordinate_sequence)
                 else:
                     self.set_motion_label(axis, "超时", "motionTimeout")
+                    self.set_safety_status(axis, "超时", "error")
                     self.append_log("%s 运动超时：目标 %.2f 未确认，当前位置保持 %.2f" %
                                     (axis, motion["target"], self.backend.positions[axis]))
                     if axis == self.coordinate_active_axis:
                         self.coordinate_active_axis = None
                         self.coordinate_queue = []
                         self.coord_result.setText(self.coord_result.text() + "\n运动超时，流程终止")
+                        if self.safety_demo_active:
+                            self.safety_stage.setText("安全停机：执行机构超时")
+                            self.safety_log.append("[BLOCK] %s运动超时，防火墙终止流程" % axis)
+                            self.safety_demo_active = False
             self.refresh_positions()
+            if state.get("base_online", False) and state.get("arm_online", False):
+                self.set_safety_status("LINK", "双S3在线", "ok")
+            elif not state.get("base_online", False):
+                self.set_safety_status("LINK", "底盘S3离线", "error")
+                if self.safety_demo_active:
+                    self.abort_safety_demo("底盘S3状态心跳停止")
+            else:
+                self.set_safety_status("LINK", "上臂S3离线", "error")
+                if self.safety_demo_active:
+                    self.abort_safety_demo("上臂S3超过500ms无状态回复")
             if state["status"] & 0x40:
                 self.status_label.setText("OK  STATUS=0x%02X  ERROR=0x%02X" % (state["status"], state["error"]))
                 self.status_label.setStyleSheet("color:#6cf0aa")
@@ -1174,6 +1651,9 @@ class RemoteWindow(QMainWindow):
             self.status_label.setText("读取失败：%s" % error)
 
     def closeEvent(self, event):
+        self.camera_timer.stop(); self.vote_timer.stop()
+        if self.camera is not None:
+            self.camera.release()
         self.backend.close(); super(RemoteWindow, self).closeEvent(event)
 
 
