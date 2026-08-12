@@ -560,7 +560,9 @@ class RemoteBackend(object):
             "pulses": pulses,
             "started": now,
             "earliest_done": now + 0.25,
-            "deadline": now + max(3.5, theoretical_seconds + 1.5),
+            # 升降轴负载、加减速和驱动器内部速度映射会带来较大误差，固定放宽到60秒。
+            "deadline": now + (60.0 if axis == "M2" else
+                               max(3.5, theoretical_seconds + 1.5)),
         }
         return pulses
 
