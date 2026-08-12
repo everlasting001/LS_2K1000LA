@@ -62,6 +62,7 @@ ARM_L3_CM = 9.5
 M3_HOME_DEG = 28.5
 SERVO_HOME_DEG = 127.0
 M1_SPEED_LIMIT_RPM = 25
+M2_AUTO_SPEED_RPM = 200
 GRIP_OPEN_DEG = 30
 GRIP_CLOSED_DEG = 105
 WAITING_Z_MM = 10.0
@@ -1643,12 +1644,12 @@ class RemoteWindow(QMainWindow):
             ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0),
             ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
         ], "前往等待区：先调整平面关节，再张开夹爪，最后下降到10mm")
 
     def go_home(self, checked=False):
         self.start_coordinate_sequence([
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM),
             ("M3", 90.0, self.speed.value()),
             ("SERVO", 127.0, 0),
@@ -1675,7 +1676,7 @@ class RemoteWindow(QMainWindow):
         queue = [
             ("MARK", "阶段1/6：复位与安全自检", 0),
             # 复位：最高点、关节复位、夹爪闭合。
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_CLOSED_DEG, 0),
@@ -1683,25 +1684,25 @@ class RemoteWindow(QMainWindow):
             # 等待区：先平面关节和旋转舵机，再张开夹爪，最后下降Z。
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
-            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
             ("MARK", "阶段3/6：视觉定位并抓取物料", 0),
             # 取料区：先平面定位，再下降，确认Z到位后闭合。
             ("M1", p["M1"], M1_SPEED_LIMIT_RPM), ("M3", p["M3"], self.speed.value()),
-            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, self.speed.value()),
+            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, M2_AUTO_SPEED_RPM),
             ("GRIP", GRIP_CLOSED_DEG, 0),
             ("MARK", "阶段4/6：移动到颜色对应料筐并释放", 0),
             # 放料区：先抬升，再平面定位，所有轴到位后张开。
-            ("M2", PLACE_Z_MM, self.speed.value()),
+            ("M2", PLACE_Z_MM, M2_AUTO_SPEED_RPM),
             ("M1", d["M1"], M1_SPEED_LIMIT_RPM), ("M3", d["M3"], self.speed.value()),
             ("SERVO", d["SERVO"], 0), ("GRIP", GRIP_OPEN_DEG, 0),
             ("MARK", "阶段5/6：返回等待区", 0),
             # 回等待区：先Z，再平面定位，夹爪保持张开。
-            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M2", WAITING_Z_MM, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
             ("MARK", "阶段6/6：安全复位并结束", 0),
             # 回复位区：先Z，再平面关节，最后保持夹爪张开。
-            ("M2", 0.0, self.speed.value()),
+            ("M2", 0.0, M2_AUTO_SPEED_RPM),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
             ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
             ("GRIP", GRIP_OPEN_DEG, 0),
@@ -1717,7 +1718,7 @@ class RemoteWindow(QMainWindow):
         planar = [("M1", solution["M1"], M1_SPEED_LIMIT_RPM),
                   ("M3", solution["M3"], self.speed.value()),
                   ("SERVO", solution["SERVO"], 0)]
-        z_step = [("M2", self.coord_z.value(), self.speed.value())]
+        z_step = [("M2", self.coord_z.value(), M2_AUTO_SPEED_RPM)]
         grip_target = int(self.coord_grip.currentData())
         grip_step = [("GRIP", grip_target, 0)]
         if grip_target == GRIP_CLOSED_DEG:
