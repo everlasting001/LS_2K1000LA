@@ -53,7 +53,7 @@ GRIP_CLOSED_DEG = 105
 WAITING_Z_MM = 10.0
 PICKUP_Z_MM = 140.0
 PLACE_Z_MM = 20.0
-PICKUP_X_CM, PICKUP_Y_CM = 25.0, 15.0
+PICKUP_X_CM, PICKUP_Y_CM = -25.0, 20.0
 
 
 def forward_kinematics(m1_deg, m3_deg, servo_deg):
@@ -683,38 +683,50 @@ class RemoteWindow(QMainWindow):
         for box in (self.coord_x, self.coord_y):
             box.setDecimals(1); box.setSingleStep(0.5); box.setSuffix(" cm"); box.setMinimumHeight(40)
         self.coord_x.setValue(-10.5); self.coord_y.setValue(-21.8)  # 默认红筐中心
+        self.coord_z = QDoubleSpinBox(); self.coord_z.setRange(0, 150)
+        self.coord_z.setDecimals(1); self.coord_z.setSingleStep(1.0)
+        self.coord_z.setSuffix(" mm"); self.coord_z.setMinimumHeight(40)
+        self.coord_z.setValue(PLACE_Z_MM)
+        self.coord_grip = QComboBox(); self.coord_grip.setMinimumHeight(40)
+        self.coord_grip.addItem("张开 30°", GRIP_OPEN_DEG)
+        self.coord_grip.addItem("闭合 105°", GRIP_CLOSED_DEG)
         self.coordinate_force_negative_x = False
         self.coord_x.valueChanged.connect(self.coordinate_value_edited)
         self.coord_y.valueChanged.connect(self.coordinate_value_edited)
         form.addWidget(QLabel("目标 X"), 0, 0); form.addWidget(self.coord_x, 0, 1)
         form.addWidget(QLabel("目标 Y"), 1, 0); form.addWidget(self.coord_y, 1, 1)
+        form.addWidget(QLabel("目标 Z"), 2, 0); form.addWidget(self.coord_z, 2, 1)
+        form.addWidget(QLabel("目标夹爪"), 3, 0); form.addWidget(self.coord_grip, 3, 1)
         solve = QPushButton("仅解算"); solve.setMinimumHeight(42); solve.clicked.connect(self.solve_coordinate)
         execute = QPushButton("执行目标"); execute.setObjectName("primary"); execute.setMinimumHeight(42)
         execute.clicked.connect(self.execute_coordinate)
-        form.addWidget(solve, 2, 0); form.addWidget(execute, 2, 1)
+        form.addWidget(solve, 4, 0); form.addWidget(execute, 4, 1)
         waiting = QPushButton("到等待区"); waiting.setMinimumHeight(40)
         waiting.clicked.connect(self.go_waiting_zone)
         reset = QPushButton("整体复位"); reset.setObjectName("primary"); reset.setMinimumHeight(40)
         reset.clicked.connect(self.go_home)
-        form.addWidget(waiting, 3, 0); form.addWidget(reset, 3, 1)
+        form.addWidget(waiting, 5, 0); form.addWidget(reset, 5, 1)
         self.touch_execute = QCheckBox("触摸可达点后自动执行")
-        self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 4, 0, 1, 2)
+        self.touch_execute.setChecked(True); form.addWidget(self.touch_execute, 6, 0, 1, 2)
+        pickup_button = QPushButton("物料抓取点 (-25.0, 20.0)")
+        pickup_button.setMinimumHeight(40); pickup_button.clicked.connect(self.select_pickup_target)
+        form.addWidget(pickup_button, 7, 0, 1, 2)
         bin_targets = (("红筐", -10.5, -21.8), ("黄筐", 10.5, -21.8),
                        ("蓝筐", -10.5, -35.4), ("绿筐", 10.5, -35.4))
         for index, (name, x, y) in enumerate(bin_targets):
             button = QPushButton(name)
             button.clicked.connect(lambda checked=False, tx=x, ty=y: self.select_bin_target(tx, ty))
-            form.addWidget(button, 5 + index // 2, index % 2)
+            form.addWidget(button, 8 + index // 2, index % 2)
         cycle = QPushButton("执行完整取放流程")
         cycle.setObjectName("primary"); cycle.setMinimumHeight(42)
         cycle.clicked.connect(self.execute_sorting_cycle)
-        form.addWidget(cycle, 7, 0, 1, 2)
+        form.addWidget(cycle, 10, 0, 1, 2)
         self.coord_result = QLabel("点击网格或输入坐标后解算")
         self.coord_result.setWordWrap(True); self.coord_result.setMinimumHeight(95)
-        form.addWidget(self.coord_result, 8, 0, 1, 2)
+        form.addWidget(self.coord_result, 11, 0, 1, 2)
         legend = QLabel("绿色：可达  红色：不可达/禁入\n彩色区：十字分割的红黄蓝绿物料筐\n执行顺序：M1 → M3 → 夹爪")
-        legend.setWordWrap(True); form.addWidget(legend, 9, 0, 1, 2)
-        form.setRowStretch(10, 1)
+        legend.setWordWrap(True); form.addWidget(legend, 12, 0, 1, 2)
+        form.setRowStretch(13, 1)
         layout.addWidget(controls, 1)
         return page
 
@@ -1028,7 +1040,7 @@ class RemoteWindow(QMainWindow):
                 self.rotate.setValue(command)
                 self.refresh_positions()
                 self.append_log("夹爪已调整到解算角度，舵机=%d°" % command)
-                self.advance_coordinate_sequence()
+                QTimer.singleShot(700, self.advance_coordinate_sequence)
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("坐标运动失败：%s" % error)
@@ -1042,7 +1054,7 @@ class RemoteWindow(QMainWindow):
                 self.refresh_positions()
                 self.append_log("夹爪已%s，角度=%d°" %
                                 ("张开" if command == GRIP_OPEN_DEG else "闭合", command))
-                self.advance_coordinate_sequence()
+                QTimer.singleShot(500, self.advance_coordinate_sequence)
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("夹爪动作失败：%s" % error)
