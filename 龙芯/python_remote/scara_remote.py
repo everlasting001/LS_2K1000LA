@@ -651,6 +651,7 @@ class RemoteWindow(QMainWindow):
         self.camera_failures = 0
         self.telemetry_index = 0
         self.phase_current_display = {"M1": 10.0, "M2": 10.0, "M3": 10.0}
+        self.motor_node_online = {"M1": False, "M2": False, "M3": False}
         self.telemetry_sequences = self.build_telemetry_sequences()
         self.zero_data = self.load_zero_data()
         self.setWindowTitle("龙芯 SCARA 简易遥控与零点校准")
@@ -1272,6 +1273,12 @@ class RemoteWindow(QMainWindow):
             return
         index = self.telemetry_index % 360
         for axis in ("M1", "M2", "M3"):
+            if not self.motor_node_online.get(axis, False):
+                temp_label, voltage_label, current_label = self.telemetry_labels[axis]
+                temp_label.setText("--")
+                voltage_label.setText("--")
+                current_label.setText("--")
+                continue
             sequence = self.telemetry_sequences[axis]
             temperature = max(22.0, min(26.0, sequence["temperature"][index]))
             voltage = max(10000, min(11200, sequence["voltage"][index]))
@@ -1917,14 +1924,40 @@ class RemoteWindow(QMainWindow):
                             self.safety_log.append("[BLOCK] %s运动超时，防火墙终止流程" % axis)
                             self.safety_demo_active = False
             self.refresh_positions()
-            if state.get("base_online", False) and state.get("arm_online", False):
+            base_online = bool(state.get("base_online", False))
+            arm_online = bool(state.get("arm_online", False))
+            self.motor_node_online["M1"] = base_online
+            self.motor_node_online["M2"] = arm_online
+            self.motor_node_online["M3"] = arm_online
+            done_bits = {"M1": 0x01, "M2": 0x02, "M3": 0x04}
+
+            if base_online and arm_online:
                 self.set_safety_status("LINK", "双S3在线", "ok")
-            elif not state.get("base_online", False):
-                self.set_safety_status("LINK", "底盘S3离线", "error")
+                for axis in ("M1", "M2", "M3"):
+                    if axis in self.backend.pending_motions:
+                        self.set_safety_status(axis, "运动中", "busy")
+                    elif state["done"] & done_bits[axis]:
+                        self.set_safety_status(axis, "已到位", "ok")
+                    else:
+                        self.set_safety_status(axis, "在线/待机", "ok")
+                self.set_safety_status("SERVO", "在线/待机", "ok")
+                self.set_safety_status("GRIP", "在线/待机", "ok")
+            elif not base_online:
+                self.set_safety_status("LINK", "全部执行节点离线", "error")
+                for key in ("M1", "M2", "M3", "SERVO", "GRIP"):
+                    self.set_safety_status(key, "离线", "error")
                 if self.safety_demo_active:
                     self.abort_safety_demo("底盘S3状态心跳停止")
             else:
                 self.set_safety_status("LINK", "上臂S3离线", "error")
+                if "M1" in self.backend.pending_motions:
+                    self.set_safety_status("M1", "运动中", "busy")
+                elif state["done"] & done_bits["M1"]:
+                    self.set_safety_status("M1", "已到位", "ok")
+                else:
+                    self.set_safety_status("M1", "在线/待机", "ok")
+                for key in ("M2", "M3", "SERVO", "GRIP"):
+                    self.set_safety_status(key, "离线", "error")
                 if self.safety_demo_active:
                     self.abort_safety_demo("上臂S3超过500ms无状态回复")
             if state["status"] & 0x40:
@@ -1936,6 +1969,7 @@ class RemoteWindow(QMainWindow):
             self.em_label.setText("当前：%s" % ("全部缩回" if not state["em"] else "EM%d推出" % ((state["em"].bit_length()))))
             self.refresh_zero_labels()
         except Exception as error:
+            self.motor_node_online = {"M1": False, "M2": False, "M3": False}
             self.status_label.setText("读取失败：%s" % error)
 
     def closeEvent(self, event):
