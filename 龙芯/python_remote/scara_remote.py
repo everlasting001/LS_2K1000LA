@@ -1773,9 +1773,11 @@ class RemoteWindow(QMainWindow):
                 self.rotate.setValue(command)
                 self.refresh_positions()
                 self.append_log("夹爪已调整到解算角度，舵机=%d°" % command)
-                # 舵机没有真实到位反馈，按角度差留足机械动作时间，避免尚未转完便下降Z轴。
-                settle_ms = max(1000, min(5000, 700 + abs(command - previous) * 18))
-                self.append_log("旋转舵机等待机械到位：%dms" % settle_ms)
+                # 舵机没有真实到位反馈：固定等待1秒后推进下一动作。
+                settle_ms = 1000
+                self.append_log("旋转舵机机械稳定等待：1s，随后执行下一动作")
+                if self.safety_demo_active:
+                    self.safety_stage.setText("旋转舵机调整中：等待1秒后继续")
                 QTimer.singleShot(settle_ms, lambda: self.finish_demo_actuator("SERVO"))
             except Exception as error:
                 self.coordinate_queue = []
