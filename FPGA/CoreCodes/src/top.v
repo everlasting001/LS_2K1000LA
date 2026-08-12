@@ -99,8 +99,8 @@ module top (
     wire invalid_speed = (reg_speed == 16'd0) || (reg_speed > 16'd1000);
     wire invalid_m1 = ($signed(reg_m1_pulse) < -32'sd12000) ||
                       ($signed(reg_m1_pulse) >  32'sd12000);
-    wire invalid_m2 = ($signed(reg_m2_pulse) < -32'sd192000) ||
-                      ($signed(reg_m2_pulse) >  32'sd192000);
+    wire invalid_m2 = ($signed(reg_m2_pulse) < -32'sd240000) ||
+                      ($signed(reg_m2_pulse) >  32'sd240000);
     wire invalid_m3 = ($signed(reg_m3_pulse) < -32'sd10000) ||
                       ($signed(reg_m3_pulse) >  32'sd10000);
     wire invalid_servo = (reg_sv1 > 16'd270) || (reg_sv2 > 16'd180);

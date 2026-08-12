@@ -42,8 +42,9 @@ static const uint8_t M3_TX = 15;
 static const uint8_t ROTATE_PIN  = 4;     // 旋转舵机 (270° 数字舵机)
 static const uint8_t GRIPPER_PIN = 5;     // 夹爪舵机 (180° 数字舵机)
 
-// 单次运动安全超时；系统采用一次下发、执行到位，不要求空闲时持续心跳。
-static const uint32_t MOTION_TIMEOUT_MS = 3000;
+// 单次运动安全超时；升降长行程单独放宽，小臂仍保持快速保护。
+static const uint32_t M2_MOTION_TIMEOUT_MS = 60000;
+static const uint32_t M3_MOTION_TIMEOUT_MS = 3000;
 
 // ============================================================
 // 二、状态变量
@@ -66,6 +67,10 @@ static uint32_t last_valid_command = 0;   // 最后有效命令时间
 static uint8_t last_executed_seq = 0;
 static bool have_executed_seq = false;
 static uint8_t active_motion_mask = 0;    // bit0=M2，bit1=M3
+static uint32_t m2_motion_started = 0;
+static uint32_t m3_motion_started = 0;
+static uint32_t m2_ignore_done_until = 0;
+static uint32_t m3_ignore_done_until = 0;
 
 // 电机轮询控制
 static uint32_t last_motor_poll = 0;
@@ -196,6 +201,10 @@ static void send_status() {
     if (millis() - last_status < 50) return;
     last_status = millis();
 
+    // 新运动尚未确认到位时，不得把驱动器上一条命令残留的DONE位上报给龙芯。
+    if (active_motion_mask & 0x01) status_packet.stat1 &= ~0x02;
+    if (active_motion_mask & 0x02) status_packet.stat2 &= ~0x02;
+
     status_packet.magic   = STATUS_MAGIC;
     status_packet.version = PROTOCOL_VERSION;
     status_packet.device  = DEV_ARM;
@@ -224,7 +233,8 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x02;
             emm_read_status(Serial2, M3_ADDR, status_packet.stat2);
-            if (status_packet.stat2 & 0x02) active_motion_mask &= ~0x02;
+            if (millis() >= m3_ignore_done_until && (status_packet.stat2 & 0x02))
+                active_motion_mask &= ~0x02;
         }
     } else {
         // 轮询 M2 (升降, Serial1)
@@ -233,7 +243,8 @@ static void poll_motors() {
         } else {
             status_packet.error &= ~0x01;
             emm_read_status(Serial1, M2_ADDR, status_packet.stat1);
-            if (status_packet.stat1 & 0x02) active_motion_mask &= ~0x01;
+            if (millis() >= m2_ignore_done_until && (status_packet.stat1 & 0x02))
+                active_motion_mask &= ~0x01;
         }
     }
 }
@@ -303,7 +314,7 @@ void loop() {
             // M2 (升降)
             if (c.flags & FLAG_M2_ENABLE) {
                 uint16_t spd = c.speed1 ? c.speed1 : 300;
-                if (c.value1 < -192000 || c.value1 > 192000 || spd > 1000) {
+                if (c.value1 < -240000 || c.value1 > 240000 || spd > 1000) {
                     status_packet.error |= 0x08;
                 } else if (!emm_position(Serial1, M2_ADDR, c.value1,
                                   spd, relative)) {
@@ -311,6 +322,9 @@ void loop() {
                 } else {
                     status_packet.error &= ~0x09;
                     active_motion_mask |= 0x01;
+                    m2_motion_started = millis();
+                    m2_ignore_done_until = m2_motion_started + 300;
+                    status_packet.stat1 &= ~0x02;
                 }
             }
 
@@ -325,6 +339,9 @@ void loop() {
                 } else {
                     status_packet.error &= ~0x0A;
                     active_motion_mask |= 0x02;
+                    m3_motion_started = millis();
+                    m3_ignore_done_until = m3_motion_started + 300;
+                    status_packet.stat2 &= ~0x02;
                 }
             }
         }
@@ -352,10 +369,17 @@ void loop() {
         }
     }
 
-    // ---- 运动超时检测：只有尚未到位的运动任务才计时 ----
-    if (active_motion_mask && millis() - last_valid_command > MOTION_TIMEOUT_MS) {
-        emergency_stop();
-        active_motion_mask = 0;
+    // ---- 分轴运动超时：M2长行程60秒，M3保持3秒；互不连带停止 ----
+    if ((active_motion_mask & 0x01) &&
+            millis() - m2_motion_started > M2_MOTION_TIMEOUT_MS) {
+        emm_stop(Serial1, M2_ADDR);
+        active_motion_mask &= ~0x01;
+        status_packet.error |= 0x04;
+    }
+    if ((active_motion_mask & 0x02) &&
+            millis() - m3_motion_started > M3_MOTION_TIMEOUT_MS) {
+        emm_stop(Serial2, M3_ADDR);
+        active_motion_mask &= ~0x02;
         status_packet.error |= 0x04;
     }
 

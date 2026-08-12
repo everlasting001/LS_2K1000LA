@@ -48,6 +48,12 @@ ARM_L3_CM = 9.5
 M3_HOME_DEG = 28.5
 SERVO_HOME_DEG = 127.0
 M1_SPEED_LIMIT_RPM = 25
+GRIP_OPEN_DEG = 30
+GRIP_CLOSED_DEG = 105
+WAITING_Z_MM = 10.0
+PICKUP_Z_MM = 140.0
+PLACE_Z_MM = 20.0
+PICKUP_X_CM, PICKUP_Y_CM = 25.0, 15.0
 
 
 def forward_kinematics(m1_deg, m3_deg, servo_deg):
@@ -356,7 +362,7 @@ class RemoteBackend(object):
         self.positions = dict(HOME_POSITIONS)
         self.raw_positions = {name: 0 for name in self.positions}
         self.servo_rotate = 127
-        self.servo_grip = 80
+        self.servo_grip = GRIP_CLOSED_DEG
         self.em_state = 0
         self.em_deadline = 0.0
         self.remote_error = 0
@@ -609,7 +615,7 @@ class RemoteWindow(QMainWindow):
         self.position_labels = {}
         self.motion_labels = {}
         definitions = (("M1 大臂", "M1", "°", 0.0, 0.0, 350.0),
-                       ("M2 升降（0=最高，向下为正）", "M2", "mm", 0.0, 0.0, 100.0),
+                       ("M2 升降（0=最高，向下为正）", "M2", "mm", 0.0, 0.0, 150.0),
                        ("M3 小臂", "M3", "°", 28.5, 28.5, 300.0))
         self.axis_steps = {}
         self.axis_sliders = {}
@@ -676,7 +682,7 @@ class RemoteWindow(QMainWindow):
         self.coord_y = QDoubleSpinBox(); self.coord_y.setRange(-45, 45)
         for box in (self.coord_x, self.coord_y):
             box.setDecimals(1); box.setSingleStep(0.5); box.setSuffix(" cm"); box.setMinimumHeight(40)
-        self.coord_x.setValue(-28.2); self.coord_y.setValue(9.5)
+        self.coord_x.setValue(-10.5); self.coord_y.setValue(-21.8)  # 默认红筐中心
         self.coordinate_force_negative_x = False
         self.coord_x.valueChanged.connect(self.coordinate_value_edited)
         self.coord_y.valueChanged.connect(self.coordinate_value_edited)
@@ -699,12 +705,16 @@ class RemoteWindow(QMainWindow):
             button = QPushButton(name)
             button.clicked.connect(lambda checked=False, tx=x, ty=y: self.select_bin_target(tx, ty))
             form.addWidget(button, 5 + index // 2, index % 2)
+        cycle = QPushButton("执行完整取放流程")
+        cycle.setObjectName("primary"); cycle.setMinimumHeight(42)
+        cycle.clicked.connect(self.execute_sorting_cycle)
+        form.addWidget(cycle, 7, 0, 1, 2)
         self.coord_result = QLabel("点击网格或输入坐标后解算")
         self.coord_result.setWordWrap(True); self.coord_result.setMinimumHeight(95)
-        form.addWidget(self.coord_result, 7, 0, 1, 2)
+        form.addWidget(self.coord_result, 8, 0, 1, 2)
         legend = QLabel("绿色：可达  红色：不可达/禁入\n彩色区：十字分割的红黄蓝绿物料筐\n执行顺序：M1 → M3 → 夹爪")
-        legend.setWordWrap(True); form.addWidget(legend, 8, 0, 1, 2)
-        form.setRowStretch(9, 1)
+        legend.setWordWrap(True); form.addWidget(legend, 9, 0, 1, 2)
+        form.setRowStretch(10, 1)
         layout.addWidget(controls, 1)
         return page
 
@@ -712,7 +722,7 @@ class RemoteWindow(QMainWindow):
         page = QWidget(); main = QHBoxLayout(page)
         left = QVBoxLayout(); servo_box = QGroupBox("舵机") ; sg = QGridLayout(servo_box)
         self.rotate = QSpinBox(); self.rotate.setRange(0, 270); self.rotate.setValue(127); self.rotate.setSuffix("°")
-        self.grip = QSpinBox(); self.grip.setRange(0, 180); self.grip.setValue(80); self.grip.setSuffix("°")
+        self.grip = QSpinBox(); self.grip.setRange(0, 180); self.grip.setValue(GRIP_CLOSED_DEG); self.grip.setSuffix("°")
         send_servo = QPushButton("发送舵机角度"); send_servo.clicked.connect(self.send_servos)
         sg.addWidget(QLabel("旋转舵机"), 0, 0); sg.addWidget(self.rotate, 0, 1)
         sg.addWidget(QLabel("夹爪舵机"), 1, 0); sg.addWidget(self.grip, 1, 1); sg.addWidget(send_servo, 2, 0, 1, 2)
@@ -931,15 +941,67 @@ class RemoteWindow(QMainWindow):
             ("M1", 0.0, M1_SPEED_LIMIT_RPM),
             ("M3", 90.0, self.speed.value()),
             ("SERVO", waiting_servo, 0),
-        ], "前往等待区：M1=0°，M3=90°，夹爪=%.1f°（平行−X）" % waiting_servo)
+            ("GRIP", GRIP_OPEN_DEG, 0),
+            ("M2", WAITING_Z_MM, self.speed.value()),
+        ], "前往等待区：先调整平面关节，再张开夹爪，最后下降到10mm")
 
     def go_home(self, checked=False):
         self.start_coordinate_sequence([
+            ("M2", 0.0, self.speed.value()),
             ("M1", 0.0, M1_SPEED_LIMIT_RPM),
             ("M3", 90.0, self.speed.value()),
             ("SERVO", 127.0, 0),
             ("M3", M3_HOME_DEG, self.speed.value()),
-        ], "安全复位：先回等待姿态，再收小臂至机械复位角")
+            ("GRIP", GRIP_CLOSED_DEG, 0),
+        ], "整体复位：Z=0mm，机械臂复位，夹爪闭合105°")
+
+    def execute_sorting_cycle(self, checked=False):
+        """按到位事件推进一次完整取放，放置点采用当前坐标（建议用料筐快捷键）。"""
+        pickup = inverse_kinematics_flexible(
+            PICKUP_X_CM, PICKUP_Y_CM, self.backend.positions["M1"],
+            self.backend.positions["M3"], self.backend.servo_rotate)
+        place = inverse_kinematics_flexible(
+            self.coord_x.value(), self.coord_y.value(), self.backend.positions["M1"],
+            self.backend.positions["M3"], self.backend.servo_rotate)
+        waiting_servo = servo_for_negative_x(0.0, 90.0, self.backend.servo_rotate)
+        if not pickup:
+            QMessageBox.warning(self, "取料点不可达", "固定取料点 (25, 15) cm 无合法逆解")
+            return
+        if not place:
+            QMessageBox.warning(self, "放料点不可达", "请先通过红/黄/蓝/绿快捷按钮选择合法筐中心")
+            return
+        p, d = pickup[0], place[0]
+        queue = [
+            # 复位：最高点、关节复位、夹爪闭合。
+            ("M2", 0.0, self.speed.value()),
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
+            ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
+            ("GRIP", GRIP_CLOSED_DEG, 0),
+            # 等待区：先平面关节和旋转舵机，再张开夹爪，最后下降Z。
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
+            ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
+            ("M2", WAITING_Z_MM, self.speed.value()),
+            # 取料区：先平面定位，再下降，确认Z到位后闭合。
+            ("M1", p["M1"], M1_SPEED_LIMIT_RPM), ("M3", p["M3"], self.speed.value()),
+            ("SERVO", p["SERVO"], 0), ("M2", PICKUP_Z_MM, self.speed.value()),
+            ("GRIP", GRIP_CLOSED_DEG, 0),
+            # 放料区：先抬升，再平面定位，所有轴到位后张开。
+            ("M2", PLACE_Z_MM, self.speed.value()),
+            ("M1", d["M1"], M1_SPEED_LIMIT_RPM), ("M3", d["M3"], self.speed.value()),
+            ("SERVO", d["SERVO"], 0), ("GRIP", GRIP_OPEN_DEG, 0),
+            # 回等待区：先Z，再平面定位，夹爪保持张开。
+            ("M2", WAITING_Z_MM, self.speed.value()),
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
+            ("SERVO", waiting_servo, 0), ("GRIP", GRIP_OPEN_DEG, 0),
+            # 回复位区：先Z，再平面关节，最后保持夹爪张开。
+            ("M2", 0.0, self.speed.value()),
+            ("M1", 0.0, M1_SPEED_LIMIT_RPM), ("M3", 90.0, self.speed.value()),
+            ("SERVO", SERVO_HOME_DEG, 0), ("M3", M3_HOME_DEG, self.speed.value()),
+            ("GRIP", GRIP_OPEN_DEG, 0),
+        ]
+        self.start_coordinate_sequence(
+            queue, "完整取放开始：取料(25.0,15.0)，放料(%.1f,%.1f)" %
+            (self.coord_x.value(), self.coord_y.value()))
 
     def execute_coordinate(self, checked=False):
         solution = self.solve_coordinate()
@@ -970,6 +1032,20 @@ class RemoteWindow(QMainWindow):
             except Exception as error:
                 self.coordinate_queue = []
                 self.append_log("坐标运动失败：%s" % error)
+            return
+        if axis == "GRIP":
+            command = int(round(target))
+            try:
+                self.backend.set_servos(self.backend.servo_rotate, command)
+                for line in self.backend.take_write_trace(): self.append_log(line)
+                self.grip.setValue(command)
+                self.refresh_positions()
+                self.append_log("夹爪已%s，角度=%d°" %
+                                ("张开" if command == GRIP_OPEN_DEG else "闭合", command))
+                self.advance_coordinate_sequence()
+            except Exception as error:
+                self.coordinate_queue = []
+                self.append_log("夹爪动作失败：%s" % error)
             return
         delta = target - self.backend.positions[axis]
         if abs(delta) < 0.05:
